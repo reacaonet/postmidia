@@ -10,7 +10,10 @@
     "migrate": "ts-node --transpile-only src/db/migrate.ts",
     "dev:worker": "ts-node-dev --respawn --transpile-only src/worker.ts",
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify:provider-specs": "ts-node --transpile-only scripts/verify-provider-specs.ts",
+    "verify:dead-letter": "ts-node --transpile-only scripts/verify-dead-letter.ts",
+    "verify:queue": "ts-node --transpile-only scripts/verify-queue.ts"
   },
   "dependencies": {
     "@types/pg": "^8.23.1",

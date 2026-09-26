@@ -322,6 +322,141 @@ check "texto dentro do fallback aceito" "$CODE" "201"
 # verify-provider-specs.ts, porque depende de injetar um maxLength que so o
 # Postiz real popula; nao ha endpoint para simular isso por API.
 
+echo ""
+echo "=== 10. fase 9: fila morta ==="
+t() { echo "[$(date +%s)] $*" >> /tmp/e2e-trace.log; }
+: > /tmp/e2e-trace.log
+t "inicio da secao 10"
+
+# Uma conta nova por post, de proposito. O requeue de cada teste reactiva o job
+# com delay 0, e um worker remanescente o consome de imediato: a tentativa de
+# publicar falha e a conta e marcada como expired. Reusar a conta faria o post
+# seguinte ser recusado com 422 account_not_active, e o teste passaria a medir
+# expiracao de conta em vez de fila morta. (As contas da secao 7 ja chegam
+# expired pelo mesmo motivo.)
+dlq_account() {
+  curl -s -m 20 -X POST "$BASE/accounts" -H 'Content-Type: application/json' -H "$AUTH" \
+    -d "{\"network\":\"whatsapp\",\"externalAccountId\":\"wa-dlq-$1\",\"displayName\":\"DLQ $1\",\"secret\":\"tok\"}" | j '.data.id'
+}
+
+dlq_post() {
+  local when audience account
+  when=$(node -e "console.log(new Date(Date.now()+86400000).toISOString())")
+  audience=$1
+  account=$2
+  node -e "console.log(JSON.stringify({contentType:'template',text:'dlq',media:[],settings:{templateName:'promo',languageCode:'pt_BR',bodyParams:[]},accountIds:['$account'],audience:['$audience'],scheduledAt:'$when'}))"
+}
+
+DWA=$(dlq_account 1)
+[ -n "$DWA" ] && ok "conta dedicada a fila morta criada" || { bad "conta da fila morta nao criada"; exit 1; }
+
+DLQRESP=$(curl -s -m 20 -X POST "$BASE/campaigns/$CAMP/posts" -H 'Content-Type: application/json' -H "$AUTH" -d "$(dlq_post 5511900000004 "$DWA")")
+DLQJOB=$(printf '%s' "$DLQRESP" | j '.data.jobs[0].id')
+[ -n "$DLQJOB" ] && ok "post criado para o teste da fila morta" || { bad "sem job para dead-letterar: $(printf '%s' "$DLQRESP" | head -c 300)"; exit 1; }
+
+# O estado de "esgotou as tentativas" e preparado direto no store: esperar o
+# backoff real do worker nao cabe no tempo do E2E, e o store e o estado
+# autoritativo de qualquer jeito.
+# O id da entrada vem de um arquivo, nunca do stdout: o store e o pool escrevem
+# banners de inicializacao em console.log e poluiriam a captura.
+DLQFILE=/tmp/dlq-entry.txt
+npx ts-node --transpile-only scripts/seed-dead-letter.ts "$SLUG" "$DLQJOB" "$(cygpath -w "$DLQFILE")" 2>/tmp/seed-dlq.log
+DLQ=$(cat "$DLQFILE" 2>/dev/null)
+t "primeiro seeding: '$DLQ'"
+[ -n "$DLQ" ] && ok "entrada de fila morta semeada" || { bad "seeding da fila morta falhou: $(cat /tmp/seed-dlq.log)"; exit 1; }
+
+# Sem token a triagem e fechada, como qualquer rota de tenant.
+CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$BASE/dead-letters")
+check "fila morta sem token (401)" "$CODE" "401"
+
+# Token invalido tambem.
+CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$BASE/dead-letters" -H "Authorization: Bearer lixo")
+check "fila morta com token invalido (401)" "$CODE" "401"
+
+# A listagem traz a entrada aberta.
+DLQOPEN=$(curl -s -m 20 "$BASE/dead-letters?resolution=open" -H "$AUTH" | j '.data.length')
+check "fila morta lista a entrada aberta" "$DLQOPEN" "1"
+
+# O filtro `open` e o que esconde entradas ja tratadas; conferimos que o
+# endpoint de listagem distingue, e nao so que responde 200.
+DLQR=$(curl -s -m 20 "$BASE/dead-letters?resolution=requeued" -H "$AUTH" | j '.data.length')
+check "filtro requeued vazio antes do requeue" "$DLQR" "0"
+
+# Id inexistente e 404, nao 200 com lista vazia: requeue no vazio sem feedback
+# faria o operador achar que deu certo.
+CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$BASE/dead-letters/00000000-0000-0000-0000-000000000000/resolve" \
+  -H 'Content-Type: application/json' -H "$AUTH" -d '{"action":"requeue"}')
+check "resolve de entrada inexistente (404)" "$CODE" "404"
+
+# Action invalida e rejeitada pelo schema, antes de qualquer escrita.
+CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$BASE/dead-letters/$DLQ/resolve" \
+  -H 'Content-Type: application/json' -H "$AUTH" -d '{"action":"destruir"}')
+t "action invalida respondeu $CODE"
+check "resolve com action invalida (400)" "$CODE" "400"
+
+# Requeue: fecha a entrada, zera o orcamento de tentativas e devolve o job para a fila.
+REQUEUE=$(curl -s -m 20 -X POST "$BASE/dead-letters/$DLQ/resolve" -H 'Content-Type: application/json' -H "$AUTH" -d '{"action":"requeue"}')
+t "requeue respondeu: $(printf '%s' "$REQUEUE" | head -c 120)"
+check "requeue marcou resolution" "$(printf '%s' "$REQUEUE" | j '.data.deadLetter.resolution')" "requeued"
+check "requeue somou requeueCount" "$(printf '%s' "$REQUEUE" | j '.data.deadLetter.requeueCount')" "1"
+check "requeue devolveu o job para queued" "$(printf '%s' "$REQUEUE" | j '.data.job.status')" "queued"
+check "requeue zerou as tentativas" "$(printf '%s' "$REQUEUE" | j '.data.job.attempts')" "0"
+ok "requeue reagendou o job com orcamento novo"
+
+# Tratar duas vezes a mesma entrada e conflito, senao um segundo clique
+# republicaria o post.
+CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$BASE/dead-letters/$DLQ/resolve" \
+  -H 'Content-Type: application/json' -H "$AUTH" -d '{"action":"requeue"}')
+check "segundo resolve da mesma entrada (409)" "$CODE" "409"
+
+# Requeue nao republica job que ja deu certo: o job pode ter sido concluido
+# entre a leitura da triagem e o clique.
+DWA2=$(dlq_account 2)
+DLQRESP2=$(curl -s -m 20 -X POST "$BASE/campaigns/$CAMP/posts" -H 'Content-Type: application/json' -H "$AUTH" -d "$(dlq_post 5511900000005 "$DWA2")")
+DLQJOB2=$(printf '%s' "$DLQRESP2" | j '.data.jobs[0].id')
+[ -n "$DLQJOB2" ] || { bad "sem segundo job para dead-letterar: $(printf '%s' "$DLQRESP2" | head -c 300)"; exit 1; }
+DLQFILE2=/tmp/dlq-entry-2.txt
+npx ts-node --transpile-only scripts/seed-dead-letter.ts "$SLUG" "$DLQJOB2" "$(cygpath -w "$DLQFILE2")" --succeeded >/dev/null 2>&1
+DLQ2=$(cat "$DLQFILE2" 2>/dev/null)
+t "segundo seeding terminou: '$DLQ2'"
+[ -n "$DLQ2" ] || { bad "sem entrada para o teste de job publicado"; exit 1; }
+CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$BASE/dead-letters/$DLQ2/resolve" \
+  -H 'Content-Type: application/json' -H "$AUTH" -d '{"action":"requeue"}')
+t "requeue de job publicado respondeu $CODE"
+check "requeue de job ja publicado (409)" "$CODE" "409"
+
+# Discard fecha sem reagendar nada.
+DWA3=$(dlq_account 3)
+DLQRESP3=$(curl -s -m 20 -X POST "$BASE/campaigns/$CAMP/posts" -H 'Content-Type: application/json' -H "$AUTH" -d "$(dlq_post 5511900000006 "$DWA3")")
+DLQJOB3=$(printf '%s' "$DLQRESP3" | j '.data.jobs[0].id')
+[ -n "$DLQJOB3" ] || { bad "sem terceiro job para dead-letterar: $(printf '%s' "$DLQRESP3" | head -c 300)"; exit 1; }
+DLQFILE3=/tmp/dlq-entry-3.txt
+npx ts-node --transpile-only scripts/seed-dead-letter.ts "$SLUG" "$DLQJOB3" "$(cygpath -w "$DLQFILE3")" >/dev/null 2>&1
+DLQ3=$(cat "$DLQFILE3" 2>/dev/null)
+DISCARD=$(curl -s -m 20 -X POST "$BASE/dead-letters/$DLQ3/resolve" -H 'Content-Type: application/json' -H "$AUTH" -d '{"action":"discard"}')
+check "discard marcou resolution" "$(printf '%s' "$DISCARD" | j '.data.resolution')" "discarded"
+check "discard nao somou requeueCount" "$(printf '%s' "$DISCARD" | j '.data.requeueCount')" "0"
+
+# O job descartado continua como esta: discard nao e sucesso nem republicacao.
+check "discard nao mudou o job" "$(curl -s -m 20 "$BASE/jobs" -H "$AUTH" | j ".data.filter(x=>x.id==='$DLQJOB3')[0].status")" "failed"
+
+# A entrada do job que ja deu certo CONTINUA ABERTA: o requeue foi barrado com
+# 409 de proposito, e nada a tratou. As outras duas estao fechadas (uma
+# requeued, uma discarded), entao sobra exatamente uma aberta.
+DLQOPEN=$(curl -s -m 20 "$BASE/dead-letters?resolution=open" -H "$AUTH" | j '.data.length')
+check "so a entrada barrada continua aberta" "$DLQOPEN" "1"
+DLQD=$(curl -s -m 20 "$BASE/dead-letters?resolution=discarded" -H "$AUTH" | j '.data.length')
+check "entrada descartada visivel no filtro" "$DLQD" "1"
+DLQR2=$(curl -s -m 20 "$BASE/dead-letters?resolution=requeued" -H "$AUTH" | j '.data.length')
+check "entrada reagendada visivel no filtro" "$DLQR2" "1"
+
+# O isolamento entre tenants nao e testado aqui: proving-lo pela API exigiria
+# um segundo signup, e o rate limit de /auth (20 por minuto por IP) ja foi
+# consumido de proposito na secao 5. A prova mais forte fica no
+# verify-dead-letter.ts, que consulta a fila morta com o papel da aplicacao
+# (postmidia_app) e confirma que a listagem e o get de outro tenant nao veem
+# nada.
+
 # A limpeza final e feita pelo trap de EXIT, que tambem cobre o caminho de erro.
 echo ""
 echo "RESULTADO: $PASS ok, $FAIL falhas"

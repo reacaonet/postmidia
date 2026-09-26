@@ -40,7 +40,8 @@ services:
 
   # ----------------------------------------------------------------- redis ---
   # UM redis para o projeto inteiro, separado por db index:
-  #   db0 postmidia (fila BullMQ) | db1 postiz | db2 temporal
+  #   db0 postmidia (fila BullMQ) | db1 postiz
+  # Temporal nao aparece aqui: ele nao fala com Redis.
   # Nenhum servico roda FLUSHALL, entao conviver e seguro.
   redis:
     <<: *shared
@@ -106,8 +107,11 @@ services:
       start_period: 120s
 
   # -------------------------------------------------------------- temporal ---
-  # Microsservico de verdade (workflow engine): container proprio. Mas usa o
-  # Postgres e o Redis compartilhados, em database/db separados.
+  # Microsservico de verdade (workflow engine): container proprio. Usa o mesmo
+  # SERVIDOR Postgres compartilhado, mas em databases proprios (`temporal` e
+  # `temporal_visibility`, os defaults da imagem), e o Elasticsearch para
+  # visibilidade. Nao usa Redis: nao ha REDIS_URL nem qualquer variavel de Redis
+  # neste servico, e o plano do Temporal cabe em Postgres + Elasticsearch.
   temporal:
     <<: *shared
     image: temporalio/auto-setup:1.28.1

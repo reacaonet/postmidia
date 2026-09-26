@@ -109,9 +109,10 @@ reiniciar a API reinicia o consumidor da fila.
 ## Verificação
 
 ```bash
-.\scripts\run-e2e.ps1                                  # 29 checks, sobe API e worker
-npx ts-node --transpile-only scripts/verify-provider-specs.ts   # 10 checks
-npx ts-node --transpile-only scripts/verify-queue.ts            # fila fora do HTTP
+.\scripts\run-e2e.ps1                                  # 51 checks, sobe API e worker
+npm run verify:provider-specs                          # 10 checks, sem Docker
+npm run verify:dead-letter                             # 17 checks, exige DATABASE_URL
+npm run verify:queue                                   # fila fora do HTTP
 npm run typecheck
 ```
 
@@ -142,8 +143,17 @@ endpoint sob `/auth` autenticado exige `Authorization: Bearer <token>`.
 | `GET` `POST` | `/campaigns` | listar e criar campanhas |
 | `POST` | `/campaigns/:id/posts` | agenda post; 422 se algum destino rejeitar |
 | `GET` | `/jobs` | jobs com filtro por status e campanha |
+| `GET` | `/dead-letters` | fila morta; `?resolution=open\|requeued\|discarded` e `?limit=` |
+| `POST` | `/dead-letters/:id/resolve` | `{"action":"requeue"\|"discard"}`; exige `owner`/`admin` |
 | `GET` `POST` | `/whatsapp/templates` | templates; hoje o status é manual |
 | `PATCH` | `/whatsapp/templates/:id/status` | muda o status do template |
+
+A fila morta recebe o job que **esgotou as tentativas e ainda era retentável**.
+Erro não retentável é terminal e não entra — nenhuma reexecução passaria.
+`requeue` zera o orçamento de tentativas e devolve o job para a fila; `discard`
+fecha a entrada sem republicar. Os dois devolvem `409` se a entrada já foi
+tratada, ou se o job já `succeeded` no intervalo entre a leitura da triagem e o
+clique.
 
 Exemplo de ponta a ponta:
 
@@ -198,7 +208,9 @@ cada, e o par Redis/Postgres é o caminho de verdade.
 
 ## Estado
 
-Fases 0 a 7 implementadas e verificadas. A 6 e a 8 estão parciais por dependerem
-de credenciais ou de decisões de produto, e a 9 e a 10 ainda não começaram. O
-que falta e o que está bloqueado está em
+Fases 0 a 7 implementadas e verificadas. A 9 começou: a **DLQ está pronta**
+(tabela, RLS, store, worker, rotas e testes), e faltam reconciliação de
+`releaseIdMissing`, métricas e alerta de quota. A 6 e a 8 estão parciais por
+dependerem de credenciais ou de decisões de produto, e a 10 depende de produto.
+O que falta e o que está bloqueado está em
 [ARCHITETURA.md](ARCHITETURA.md#7-etapas-do-projeto).

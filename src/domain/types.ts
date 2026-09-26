@@ -62,6 +62,35 @@ export interface Post {
 
 export type PublishJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 
+/**
+ * Como a fila morta foi tratada. `null` e o estado aberto: ninguem agiu ainda.
+ * `discarded` e uma decisao do operador, nao um sucesso.
+ */
+export type DeadLetterResolution = 'requeued' | 'discarded';
+
+/**
+ * Job que esgotou as tentativas ainda sendo retentavel (Fase 9). So entra aqui
+ * o que ainda pode dar certo numa reexecucao: falha nao retentavel e terminal
+ * por definicao e nao entra.
+ */
+export interface DeadLetterJob {
+  id: string;
+  tenantId: string;
+  jobId: string;
+  postId: string;
+  channelAccountId: string;
+  network: Network;
+  recipient: string | null;
+  attempts: number;
+  lastError: string | null;
+  lastErrorCode: string | null;
+  resolution: DeadLetterResolution | null;
+  resolvedAt: string | null;
+  requeueCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PublishJob {
   id: string;
   tenantId: string;

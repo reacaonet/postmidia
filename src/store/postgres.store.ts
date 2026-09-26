@@ -3,6 +3,7 @@ import type {
   AuditEntry,
   Campaign,
   ChannelAccount,
+  DeadLetterJob,
   Post,
   PublishJob,
   Tenant,
@@ -10,7 +11,15 @@ import type {
   WhatsappTemplate,
 } from '../domain/types';
 import { closePool, withSystem, withTenant } from '../db/pool';
-import type { AccountInput, CampaignInput, JobInput, PostInput, Store, TemplateInput } from './types';
+import type {
+  AccountInput,
+  CampaignInput,
+  DeadLetterFilter,
+  JobInput,
+  PostInput,
+  Store,
+  TemplateInput,
+} from './types';
 
 type Row = Record<string, unknown>;
 
@@ -79,6 +88,24 @@ const mapJob = (row: Row): PublishJob => ({
   externalPostId: row.external_post_id == null ? null : String(row.external_post_id),
   permalink: row.permalink == null ? null : String(row.permalink),
   lastError: row.last_error == null ? null : String(row.last_error),
+  createdAt: iso(row.created_at),
+  updatedAt: iso(row.updated_at),
+});
+
+const mapDeadLetter = (row: Row): DeadLetterJob => ({
+  id: String(row.id),
+  tenantId: tenantIdOf(row),
+  jobId: String(row.job_id),
+  postId: String(row.post_id),
+  channelAccountId: String(row.channel_account_id),
+  network: row.network as DeadLetterJob['network'],
+  recipient: row.recipient == null ? null : String(row.recipient),
+  attempts: Number(row.attempts),
+  lastError: row.last_error == null ? null : String(row.last_error),
+  lastErrorCode: row.last_error_code == null ? null : String(row.last_error_code),
+  resolution: (row.resolution ?? null) as DeadLetterJob['resolution'],
+  resolvedAt: isoOrNull(row.resolved_at),
+  requeueCount: Number(row.requeue_count),
   createdAt: iso(row.created_at),
   updatedAt: iso(row.updated_at),
 });
@@ -415,6 +442,86 @@ export const createPostgresStore = (): Store => ({
         values
       );
       return result.rows.map(mapJob);
+    }),
+
+  upsertDeadLetter: (input) =>
+    withTenant(input.tenantId, async (client) => {
+      // O ON CONFLICT reabre a entrada existente em vez de criar uma segunda.
+      // Sem isso, um job que vai e volta da fila morta apareceria N vezes para o
+      // operador, e "quantas vezes isso falhou" deixaria de ser legivel.
+      const result = await client.query(
+        `INSERT INTO dead_letter_jobs
+           (tenant_id, job_id, post_id, channel_account_id, network, recipient,
+            attempts, last_error, last_error_code)
+         SELECT $1, j.id, j.post_id, j.channel_account_id, j.network, j.recipient,
+                $3, $4::text, $5::text
+           FROM publish_jobs j
+          WHERE j.id = $2 AND j.tenant_id = $1
+         ON CONFLICT (job_id) DO UPDATE
+            SET attempts = EXCLUDED.attempts,
+                last_error = EXCLUDED.last_error,
+                last_error_code = EXCLUDED.last_error_code,
+                resolution = NULL,
+                resolved_at = NULL,
+                updated_at = now()
+         RETURNING *`,
+        [input.tenantId, input.jobId, input.attempts, input.lastError, input.lastErrorCode]
+      );
+      return first(result, mapDeadLetter);
+    }),
+
+  listDeadLetters: (tenantId, filter = {}) =>
+    withTenant(tenantId, async (client) => {
+      const conditions = ['tenant_id = $1'];
+      const values: unknown[] = [tenantId];
+      let position = 2;
+
+      if (filter.resolution === 'open') {
+        conditions.push('resolution IS NULL');
+      } else if (filter.resolution) {
+        conditions.push(`resolution = $${position}`);
+        values.push(filter.resolution);
+        position += 1;
+      }
+
+      // Mais recentes primeiro: a fila morta e uma fila de triagem, e o que
+      // acabou de falhar e o que o operador precisa ver primeiro.
+      values.push(Math.min(Math.max(filter.limit ?? 100, 1), 500));
+
+      const result = await client.query(
+        `SELECT * FROM dead_letter_jobs
+          WHERE ${conditions.join(' AND ')}
+          ORDER BY created_at DESC
+          LIMIT $${position}`,
+        values
+      );
+      return result.rows.map(mapDeadLetter);
+    }),
+
+  getDeadLetter: (tenantId, id) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM dead_letter_jobs WHERE tenant_id = $1 AND id = $2',
+        [tenantId, id]
+      );
+      return first(result, mapDeadLetter);
+    }),
+
+  resolveDeadLetter: (tenantId, id, resolution) =>
+    withTenant(tenantId, async (client) => {
+      // Reabrir uma entrada ja descartada exigiria DELETE, e a tabela nao tem
+      // essa permissao de proposito: fila morta e registro, nao rascunho.
+      const result = await client.query(
+        `UPDATE dead_letter_jobs
+            SET resolution = $3,
+                resolved_at = now(),
+                requeue_count = requeue_count + CASE WHEN $3 = 'requeued' THEN 1 ELSE 0 END,
+                updated_at = now()
+          WHERE tenant_id = $1 AND id = $2
+          RETURNING *`,
+        [tenantId, id, resolution]
+      );
+      return first(result, mapDeadLetter);
     }),
 
   insertTemplate: (input: TemplateInput) =>

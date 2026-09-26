@@ -7,6 +7,9 @@ export const createMemoryQueue = (): PublishQueue => {
   let closed = false;
 
   return {
+    // O `dispatchKey` do Redis nao tem equivalente aqui: a fila em memoria
+    // cancela o timer anterior pelo job.id antes de reagendar, entao nao existe
+    // a colisao de id que o BullMQ teria.
     async enqueue(job: PublishJob, delayMs: number): Promise<void> {
       if (closed) {
         throw new Error('Fila encerrada');

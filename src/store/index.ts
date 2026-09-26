@@ -35,6 +35,10 @@ export const {
   getJob,
   patchJob,
   listJobs,
+  upsertDeadLetter,
+  listDeadLetters,
+  getDeadLetter,
+  resolveDeadLetter,
   insertTemplate,
   listTemplates,
   findTemplate,
@@ -42,4 +46,4 @@ export const {
 } = store;
 
 export { toPublicAccount, toPublicUser };
-export type { Store, ProviderSpec } from './types';
+export type { Store, ProviderSpec, DeadLetterFilter } from './types';

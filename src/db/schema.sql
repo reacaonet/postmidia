@@ -113,6 +113,39 @@ CREATE TABLE IF NOT EXISTS whatsapp_templates (
   UNIQUE (tenant_id, name, language_code)
 );
 
+-- Fila morta (Fase 9). Guarda o job que ESGOTOU as tentativas sendo ainda
+-- retentavel, que e o unico caso em que reexecutar faz sentido: falha nao
+-- retentavel (conteudo invalido, conta removida) nao entra aqui, porque nunca
+-- vai passar e a entrada so poluiria a fila com trabalho doomed.
+--
+-- Fica no Postgres e nao no Redis por dois motivos: o estado autoritativo do
+-- job ja e a tabela publish_jobs, e o operador precisa filtrar por tenant, o
+-- que o RLS da e de graca e o Redis nao da.
+CREATE TABLE IF NOT EXISTS dead_letter_jobs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id UUID NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
+  -- Um job so pode estar na fila morta uma vez por ciclo; um novo dead-letter
+  -- do mesmo job (requeue, falha, novo dead-letter) atualiza a linha.
+  job_id UUID NOT NULL REFERENCES publish_jobs (id) ON DELETE CASCADE,
+  post_id UUID NOT NULL REFERENCES posts (id) ON DELETE CASCADE,
+  channel_account_id UUID NOT NULL REFERENCES channel_accounts (id) ON DELETE CASCADE,
+  network TEXT NOT NULL,
+  recipient TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  last_error_code TEXT,
+  -- NULL = aberto, ninguem tratou ainda. 'requeued' = voltou para a fila.
+  -- 'discarded' = operador decidiu desistir. resolved_at preenchido = fechada.
+  resolution TEXT,
+  resolved_at TIMESTAMPTZ,
+  -- Quantas vezes esse job ja voltou da fila morta. Serve para o operador ver
+  -- que requeue em laco existe, em vez de so espiar o mesmo erro.
+  requeue_count INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (job_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_channel_accounts_tenant ON channel_accounts (tenant_id);
 CREATE INDEX IF NOT EXISTS idx_users_tenant ON users (tenant_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_tenant_created ON audit_log (tenant_id, created_at DESC);
@@ -120,6 +153,7 @@ CREATE INDEX IF NOT EXISTS idx_campaigns_tenant ON campaigns (tenant_id);
 CREATE INDEX IF NOT EXISTS idx_posts_campaign ON posts (tenant_id, campaign_id);
 CREATE INDEX IF NOT EXISTS idx_publish_jobs_due ON publish_jobs (status, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_publish_jobs_tenant ON publish_jobs (tenant_id);
+CREATE INDEX IF NOT EXISTS idx_dead_letter_jobs_open ON dead_letter_jobs (tenant_id, resolution, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_whatsapp_templates_lookup ON whatsapp_templates (tenant_id, name, language_code);
 
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
@@ -128,6 +162,7 @@ ALTER TABLE channel_accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE campaigns ENABLE ROW LEVEL SECURITY;
 ALTER TABLE posts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE publish_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dead_letter_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE whatsapp_templates ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE users FORCE ROW LEVEL SECURITY;
@@ -136,6 +171,7 @@ ALTER TABLE channel_accounts FORCE ROW LEVEL SECURITY;
 ALTER TABLE campaigns FORCE ROW LEVEL SECURITY;
 ALTER TABLE posts FORCE ROW LEVEL SECURITY;
 ALTER TABLE publish_jobs FORCE ROW LEVEL SECURITY;
+ALTER TABLE dead_letter_jobs FORCE ROW LEVEL SECURITY;
 ALTER TABLE whatsapp_templates FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation_users ON users;
@@ -144,6 +180,7 @@ DROP POLICY IF EXISTS tenant_isolation_channel_accounts ON channel_accounts;
 DROP POLICY IF EXISTS tenant_isolation_campaigns ON campaigns;
 DROP POLICY IF EXISTS tenant_isolation_posts ON posts;
 DROP POLICY IF EXISTS tenant_isolation_publish_jobs ON publish_jobs;
+DROP POLICY IF EXISTS tenant_isolation_dead_letter_jobs ON dead_letter_jobs;
 DROP POLICY IF EXISTS tenant_isolation_whatsapp_templates ON whatsapp_templates;
 
 CREATE POLICY tenant_isolation_users ON users
@@ -178,6 +215,10 @@ CREATE POLICY tenant_isolation_posts ON posts
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 
 CREATE POLICY tenant_isolation_publish_jobs ON publish_jobs
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+CREATE POLICY tenant_isolation_dead_letter_jobs ON dead_letter_jobs
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 

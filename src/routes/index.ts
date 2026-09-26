@@ -7,6 +7,7 @@ import { rateLimitByIp } from '../http/rate-limit';
 import accountRoutes from './accounts';
 import authRoutes from './auth';
 import campaignRoutes from './campaigns';
+import deadLetterRoutes from './dead-letters';
 import whatsappRoutes from './whatsapp';
 
 const router = Router();
@@ -50,6 +51,7 @@ router.use(authRoutes);
 router.use(accountRoutes);
 router.use(campaignRoutes);
 router.use(whatsappRoutes);
+router.use(deadLetterRoutes);
 
 router.use((error: unknown, _req: unknown, res: any, _next: unknown) => {
   if (error instanceof ZodError) {

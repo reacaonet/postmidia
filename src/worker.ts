@@ -4,23 +4,59 @@ import { hasAdapter, resolveAdapter } from './channels/registry';
 import { PublishError, type PublishSpec } from './channels/adapter';
 import { queue } from './queue';
 import { decryptSecret } from './security/secret-box';
-import { appendAudit, getAccount, getJob, getPost, patchJob, updateAccountStatus } from './store';
+import { appendAudit, getAccount, getJob, getPost, patchJob, updateAccountStatus, upsertDeadLetter } from './store';
 import type { PublishJob, ResolvedChannelAccount } from './domain/types';
 
 
 const backoffMs = (attempts: number): number =>
   env.PUBLISH_BACKOFF_BASE_MS * 2 ** Math.max(0, attempts - 1);
 
-const fail = async (job: PublishJob, error: PublishError): Promise<void> => {
+/**
+ * Falha terminal do job. `deadLettered` distingue os dois casos que antes
+ * caiam no mesmo `fail`: um job que ESGOTOU as tentativas sendo ainda
+ * retentavel vai para a fila morta, porque reexecutar pode dar certo; um erro
+ * nao retentavel (conteudo invalido, conta removida) nao vai, porque nenhuma
+ * reexecucao passaria e a entrada so poluiria a triagem com trabalho doomed.
+ */
+const fail = async (
+  job: PublishJob,
+  error: PublishError,
+  options: { deadLetter?: boolean } = {}
+): Promise<void> => {
+  const deadLettered = options.deadLetter === true && error.retryable;
+
   await patchJob(job.tenantId, job.id, {
     status: 'failed',
     lastError: `${error.code}: ${error.message}`,
   });
+
+  if (deadLettered) {
+    // Best-effort, pela mesma razao da auditoria: se a fila morta falhar, o
+    // job ja esta marcado como failed e o operador ainda o ve em /jobs.
+    await upsertDeadLetter({
+      tenantId: job.tenantId,
+      jobId: job.id,
+      attempts: job.attempts,
+      lastError: error.message,
+      lastErrorCode: error.code,
+    })
+      .then((entry) => {
+        if (entry) {
+          console.error(
+            `[worker] job ${job.id} esgotou ${job.attempts} tentativas (${error.code}); na fila morta ${entry.id}`
+          );
+        }
+      })
+      .catch((deadLetterError: unknown) => {
+        console.error(`[worker] falha ao dead-letterar o job ${job.id}:`, deadLetterError);
+      });
+  }
+
   await appendAudit({
     tenantId: job.tenantId,
     actorUserId: null,
     actorEmail: 'worker@system',
-    action: 'publish.failed',
+    action: deadLettered ? 'publish.dead_lettered' : 'publish.failed',
     entityType: 'publish_job',
     entityId: job.id,
     metadata: {
@@ -29,6 +65,7 @@ const fail = async (job: PublishJob, error: PublishError): Promise<void> => {
       attempts: job.attempts,
       code: error.code,
       retryable: error.retryable,
+      deadLettered,
       error: error.message,
     },
   }).catch((auditError: unknown) => {
@@ -158,7 +195,10 @@ const handleJob = async (job: PublishJob): Promise<void> => {
       return;
     }
 
-    await fail({ ...current, attempts }, publishError);
+    // Esgotou as tentativas: so vai para a fila morta se o erro ainda for
+    // retentavel. A reexecucao manual e o que o operador tera disponivel, e
+    // ela so faz sentido para o que ainda pode passar.
+    await fail({ ...current, attempts }, publishError, { deadLetter: true });
   }
 };
 

@@ -34,8 +34,14 @@ export const createConnection = (): IORedis => {
  * O id da entrada inclui a tentativa. Se usassemos so `job.id`, o re-agendamento
  * do worker seria um no-op silencioso: o BullMQ ignora `add` com id ja existente,
  * e o retry nunca voltaria a rodar.
+ *
+ * `dispatchKey` existe para o requeue da fila morta, que zera `attempts` e
+ * receberia de volta o id `#0` do dispatch original -- e esse id ainda existe
+ * em `completed` (`removeOnComplete: 1000`). O requeue passaria como sucesso e
+ * o job nunca voltaria a rodar. Quem chama supply um token unico por requeue.
  */
-const entryId = (job: PublishJob): string => `${job.id}#${job.attempts}`;
+const entryId = (job: PublishJob, dispatchKey?: string): string =>
+  dispatchKey ? `${job.id}#${dispatchKey}` : `${job.id}#${job.attempts}`;
 
 export const createRedisQueue = (): PublishQueue => {
   const connection = createConnection();
@@ -50,7 +56,7 @@ export const createRedisQueue = (): PublishQueue => {
   };
 
   return {
-    async enqueue(job: PublishJob, delayMs: number): Promise<void> {
+    async enqueue(job: PublishJob, delayMs: number, dispatchKey?: string): Promise<void> {
       if (closed) {
         throw new Error('Fila encerrada');
       }
@@ -58,7 +64,7 @@ export const createRedisQueue = (): PublishQueue => {
       const options: JobsOptions =
         delayMs > 0 ? { ...baseOptions, delay: delayMs } : { ...baseOptions };
 
-      await queue.add('publish', job, { ...options, jobId: entryId(job) });
+      await queue.add('publish', job, { ...options, jobId: entryId(job, dispatchKey) });
     },
 
     start(next: PublishJobHandler): void {

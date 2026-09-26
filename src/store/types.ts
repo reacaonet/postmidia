@@ -3,6 +3,8 @@ import type {
   Campaign,
   ChannelAccount,
   ChannelAccountStatus,
+  DeadLetterJob,
+  DeadLetterResolution,
   Post,
   PublishJob,
   PublishJobStatus,
@@ -27,6 +29,12 @@ export type TemplateInput = Omit<WhatsappTemplate, 'id' | 'createdAt'>;
 export interface JobFilter {
   status?: PublishJobStatus;
   campaignId?: string;
+}
+
+export interface DeadLetterFilter {
+  /** Ausente traz tanto as abertas quanto as ja resolvidas. */
+  resolution?: DeadLetterResolution | 'open';
+  limit?: number;
 }
 
 /** Limites autoritativos lidos do provedor (Fase 7). */
@@ -80,6 +88,35 @@ export interface Store {
   getJob(tenantId: string, id: string): Promise<PublishJob | undefined>;
   patchJob(tenantId: string, id: string, patch: Partial<PublishJob>): Promise<PublishJob | undefined>;
   listJobs(tenantId: string, filter?: JobFilter): Promise<PublishJob[]>;
+
+  /**
+   * Coloca o job na fila morta. Idempotente por `jobId`: um novo dead-letter do
+   * mesmo job reabre a entrada existente em vez de criar uma segunda, para o
+   * operador nao ver o mesmo erro repetido como se fossem ocorrencias distintas.
+   *
+   * Devolve `undefined` se o job nao existir mais (pode ter sido apagado em
+   * cascata junto com o post). Quem chama trata como nao-falha: nao ha o que
+   * dead-letterar.
+   */
+  upsertDeadLetter(input: {
+    tenantId: string;
+    jobId: string;
+    attempts: number;
+    lastError: string | null;
+    lastErrorCode: string | null;
+  }): Promise<DeadLetterJob | undefined>;
+  listDeadLetters(tenantId: string, filter?: DeadLetterFilter): Promise<DeadLetterJob[]>;
+  getDeadLetter(tenantId: string, id: string): Promise<DeadLetterJob | undefined>;
+  /**
+   * `requeued` soma em requeue_count e fecha a entrada; `discarded` tambem
+   * fecha, sem incrementar. Nao reabre: a tabela nao tem DELETE justamente
+   * porque fila morta e registro.
+   */
+  resolveDeadLetter(
+    tenantId: string,
+    id: string,
+    resolution: DeadLetterResolution
+  ): Promise<DeadLetterJob | undefined>;
 
   insertTemplate(input: TemplateInput): Promise<WhatsappTemplate>;
   listTemplates(tenantId: string): Promise<WhatsappTemplate[]>;

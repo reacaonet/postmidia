@@ -23,7 +23,11 @@
 #>
 [CmdletBinding()]
 param(
-  [int]$TimeoutSeconds = 300,
+  # 300s dava folga com folga de sobra quando a suite tinha 29 checks. A fase 9
+  # somou ~20 checks e tres chamadas ao ts-node (que paga o startup de novo
+  # cada vez), entao subir para 420 sem mudar o valor default do runner seria
+  # deixar a suite passar na base do tempo em vez de na do_orcamento.
+  [int]$TimeoutSeconds = 420,
   [int]$Port = 8601
 )
 

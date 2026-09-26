@@ -3,6 +3,7 @@ import type {
   AuditEntry,
   Campaign,
   ChannelAccount,
+  DeadLetterJob,
   Post,
   PublishJob,
   Tenant,
@@ -31,6 +32,7 @@ export const createMemoryStore = (): Store => {
   const campaigns = new Map<string, Campaign>();
   const posts = new Map<string, Post>();
   const jobs = new Map<string, PublishJob>();
+  const deadLetters = new Map<string, DeadLetterJob>();
   const templates = new Map<string, WhatsappTemplate>();
 
   const now = (): string => new Date().toISOString();
@@ -212,6 +214,77 @@ export const createMemoryStore = (): Store => {
         }
         return true;
       });
+    },
+
+    async upsertDeadLetter(input) {
+      const job = jobs.get(input.jobId);
+      if (!job || job.tenantId !== input.tenantId) {
+        return undefined;
+      }
+      const existing = [...deadLetters.values()].find(
+        (entry) => entry.jobId === input.jobId && entry.tenantId === input.tenantId
+      );
+      const timestamp = now();
+      const entry: DeadLetterJob = {
+        id: existing?.id ?? newId(),
+        tenantId: input.tenantId,
+        jobId: job.id,
+        postId: job.postId,
+        channelAccountId: job.channelAccountId,
+        network: job.network,
+        recipient: job.recipient,
+        attempts: input.attempts,
+        lastError: input.lastError,
+        lastErrorCode: input.lastErrorCode,
+        // Reabrir e o espelho do ON CONFLICT do Postgres: a entrada volta a
+        // ficar aberta em vez de duplicar.
+        resolution: null,
+        resolvedAt: null,
+        requeueCount: existing?.requeueCount ?? 0,
+        createdAt: existing?.createdAt ?? timestamp,
+        updatedAt: timestamp,
+      };
+      deadLetters.set(entry.id, entry);
+      return entry;
+    },
+
+    async listDeadLetters(tenantId, filter = {}) {
+      return [...deadLetters.values()]
+        .filter((entry) => {
+          if (entry.tenantId !== tenantId) {
+            return false;
+          }
+          if (filter.resolution === 'open') {
+            return entry.resolution === null;
+          }
+          if (filter.resolution) {
+            return entry.resolution === filter.resolution;
+          }
+          return true;
+        })
+        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+        .slice(0, Math.min(Math.max(filter.limit ?? 100, 1), 500));
+    },
+
+    async getDeadLetter(tenantId, id) {
+      const entry = deadLetters.get(id);
+      return entry && entry.tenantId === tenantId ? entry : undefined;
+    },
+
+    async resolveDeadLetter(tenantId, id, resolution) {
+      const entry = deadLetters.get(id);
+      if (!entry || entry.tenantId !== tenantId) {
+        return undefined;
+      }
+      const updated: DeadLetterJob = {
+        ...entry,
+        resolution,
+        resolvedAt: now(),
+        requeueCount: entry.requeueCount + (resolution === 'requeued' ? 1 : 0),
+        updatedAt: now(),
+      };
+      deadLetters.set(id, updated);
+      return updated;
     },
 
     async insertTemplate(input) {

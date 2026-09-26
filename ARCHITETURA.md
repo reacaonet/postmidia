@@ -146,15 +146,17 @@ erDiagram
   campaigns ||--o{ posts : contem
   posts ||--o{ publish_jobs : gera
   channel_accounts ||--o{ publish_jobs : destino
+  publish_jobs ||--o| dead_letter_jobs : dead_lettered_como
 ```
 
 | Tabela | Chave de tenant | Observações |
 |---|---|---|
 | `tenants` | — | Sem RLS; só a API cria |
-| `channel_accounts` | `UNIQUE (tenant_id, network, external_account_id)` | `encrypted_secret` |
+| `channel_accounts` | `UNIQUE (tenant_id, network, external_account_id)` | `encrypted_secret`; Fase 7: `provider_max_length`, `provider_rules`, `specs_synced_at` |
 | `campaigns` | `id` | |
 | `posts` | `campaign_id` | `media` e `settings` em `jsonb` |
 | `publish_jobs` | `post_id` | `recipient` para fan-out; índice `(status, scheduled_at)` |
+| `dead_letter_jobs` | `job_id` | Fase 9. `UNIQUE (job_id)`, `resolution` anulável, `requeue_count`, `ON DELETE CASCADE` |
 | `whatsapp_templates` | `UNIQUE (tenant_id, name, language_code)` | Sem `UNIQUE` global, senão tenants colidem |
 
 ### Mapeamento de credenciais
@@ -621,11 +623,84 @@ Hoje as URLs são passadas ao Postiz, que baixa do lado dele. O upload-from-url
 - [ ] Remover `bytes` opcional do `MediaRef` — hoje a validação só roda se o
       cliente mandar
 
-### Fase 9 — Observabilidade e operação ⬜
+### Fase 9 — Observabilidade e operação ◐
+- [x] DLQ para jobs que estouraram as tentativas
+- [ ] Reconciliação de `releaseIdMissing`
 - [ ] Métricas: jobs por tenant, taxa de falha por rede, latência de publicação
 - [ ] Alerta de quota do Postiz (90/h é pouco)
-- [ ] DLQ para jobs que estouraram as tentativas
-- [ ] Reconciliação de `releaseIdMissing`
+
+#### DLQ (implementada)
+
+`dead_letter_jobs` é a fila morta, e o estado autoritativo é o Postgres — não o
+Redis. O BullMQ é transporte; se ele perdesse a entrada, a triagem continuaria
+existindo.
+
+**Só entra o que ainda pode dar certo.** Um job que esgota as tentativas com
+erro retentável vai para a DLQ, porque o operador pode tentar de novo. Erro não
+retentável (conteúdo inválido, conta removida) é terminal por definição e vira
+`failed` sem entrada: nenhuma reexecução passaria, e a triagem só ganharia
+trabalho doomed.
+
+| Decisão | Por quê |
+| --- | --- |
+| Coluna `resolution` anulável, sem `'pending'` | Aberta é `NULL`. Um texto `'pending'` seria um terceiro estado para o mesmo significado de "ninguém agiu" |
+| `UNIQUE (job_id)` + `ON CONFLICT` | Um job que vai e volta da fila morta não vira N linhas: o operador vê uma entrada, com a tentativa mais recente |
+| Reabrir limpa `resolved_at` | Requeue zera `attempts`; o job que falhar de novo dead-lettera e precisa reaparecer como aberta |
+| `requeue_count` | Torna visível o requeue em laço. Sem ele, o operador só vê "o mesmo erro de novo" |
+| Sem `DELETE` na tabela | Fila morta é registro. Descartar é `resolution = 'discarded'`, não apagar |
+| `ON DELETE CASCADE` do job | Apagar o post leva a entrada junto; entry órfã não tem quem a treataria |
+
+**O collide de id do requeue.** O id de entrada do BullMQ é `${job.id}#${attempts}`,
+porque só `job.id` faria o reagendamento do worker ser um no-op silencioso. Mas o
+requeue zera `attempts` para dar orçamento novo, e `#0` é exatamente o id do
+dispatch original — que ainda existe em `completed` (`removeOnComplete: 1000`).
+O `add` seria ignorado, o requeue retornaria 200 e o job nunca voltaria a rodar.
+
+Por isso `enqueue` aceita um `dispatchKey` opcional, e o requeue passa
+`dlq-<entrada>-<n>`. O bug seria silencioso: a API responderia sucesso e nada
+publicaria.
+
+**Regras de corrida na rota.** `POST /dead-letters/:id/resolve` recusa, com 409:
+
+- entrada já tratada — um segundo clique republicaria o post;
+- job já `succeeded` — o operador viu a triagem antes do job concluir.
+
+Ambas são janelas reais entre a leitura da triagem e o clique. A checagem de
+`failed`/`succeeded` acontece **antes** de `patchJob` e `enqueue`, para um
+`409` nunca deixar o job meio requeueado.
+
+**Permissões.** `GET /dead-letters` exige `requireTenant`; o `resolve` exige
+`owner`/`admin`, o mesmo nível das demais mutações operacionais (contas,
+WhatsApp). Requeue dispara publicação real em massa, o que é mais forte que
+criar um post — e criar post é liberado a qualquer membro do tenant.
+
+#### Como rodar a verificação
+
+```bash
+npm run verify:dead-letter   # 17 checks, exige DATABASE_URL
+```
+
+Roda a mesma bateria nos dois backends. No Postgres ela prova o que só lá
+existe: RLS escondendo a fila morta dos demais tenants, `ON CONFLICT` realmente
+atualizando em vez de duplicar, e a `ON DELETE CASCADE` presente no catálogo.
+A cascata é conferida no catálogo, e não apagando dados: o papel da aplicação
+não tem `DELETE` de propósito, e o teste não deve escalar privilégio.
+
+O E2E (`scripts/run-e2e.ps1`, 51 checks) cobre a camada HTTP: 401 sem token,
+404 em id inexistente, 400 em `action` inválida, os 409 de corrida, o requeue
+zerando `attempts`, o discard sem tocar no job, e os três filtros. O estado de
+"esgotou as tentativas" é semeado por `scripts/seed-dead-letter.ts`, porque
+esperar o backoff real do worker não cabe no tempo do teste.
+
+Duas armadilhas desse harness, ambas custaram tempo:
+
+- O helper escreve o id da entrada num **arquivo**, nunca no stdout. `store` e
+  `pool` escrevem banners de inicialização em `console.log`, e ler o id de
+  `$(...)` devolvia três linhas e montava uma URL quebrada em silêncio.
+- Cada post de teste usa uma **conta nova**. O requeue reactiva o job com delay
+  0, um worker remanescente consome na hora, a publicação falha e a conta é
+  marcada `expired` — o post seguinte levaria 422 e o teste passaria a medir
+  outra coisa.
 
 ### Fase 10 — Produto ⬜
 - [ ] Onboarding de conexão por rede (Meta App Review, LinkedIn, TikTok)
@@ -644,7 +719,17 @@ npm run build
 npm run migrate     # exige DATABASE_MIGRATION_URL
 
 # Verificação da Fase 4 (precisa de Postgres e Redis alcançáveis)
-npx ts-node --transpile-only scripts/verify-queue.ts
+npm run verify:queue
+
+# Verificação da Fase 7 (specs do provedor; sem Docker)
+npm run verify:provider-specs
+
+# Verificação da Fase 9 (fila morta; exige DATABASE_URL)
+npm run verify:dead-letter
+
+# Suíte HTTP completa. No Windows, use o runner: ele resolve os paths do
+# Git Bash e encerra processo órfão.
+powershell -ExecutionPolicy Bypass -File scripts/run-e2e.ps1
 sh scripts/verify-e2e.sh
 
 docker run -d --name postmidia-postgres \
