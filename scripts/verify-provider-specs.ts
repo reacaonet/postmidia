@@ -129,7 +129,7 @@ check('provedor mais rigoroso que o fallback reprova antes da constante local', 
   assert.match(issue!.message, new RegExp(String(NETWORK_SPECS.instagram.text.maxChars)));
 });
 
-check('mensagem cita o fallback quando o provedor nao synchonizou', () => {
+check('mensagem cita o fallback quando o provedor nao sincronizou', () => {
   const fallback = NETWORK_SPECS.facebook.text.maxChars;
   const issue = textTooLong('facebook', fallback + 1);
   assert.ok(issue);
