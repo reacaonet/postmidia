@@ -1,0 +1,19 @@
+# Dynamic config do Temporal para o stack local do Postiz.
+#
+# O Temporal aborta na inicial se DYNAMIC_CONFIG_FILE_PATH apontar para um
+# arquivo inexistente, e a imagem oficial traz um docker.yaml de 0 bytes no
+# lugar -- por isso o compose do Postiz monta este diretorio por cima.
+#
+# Conteudo copiado do compose oficial (gitroomhq/postiz-docker-compose).
+# O valor de forceSearchAttributesCacheRefreshOnRead e do proprio upstream
+# marcado como "dev setup only": ele existe para o cache de search attributes
+# recarregar na leitura, o que ajuda em desenvolvimento e atrapalha em
+# producao. Nao copie esta linha para producao sem revisar.
+
+limit.maxIDLength:
+  - value: 255
+    constraints: {}
+
+system.forceSearchAttributesCacheRefreshOnRead:
+  - value: true
+    constraints: {}

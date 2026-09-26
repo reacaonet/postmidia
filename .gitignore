@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+
+# Segredos. .env.example e versionado de proposito: e o template com
+# placeholders, e nao um .env.* generico para nao engolir o exemplo.
+.env
+.env.local
+.env.*.local
+
+*.log
+*.tsbuildinfo
+.DS_Store
+.idea/
+.vscode/

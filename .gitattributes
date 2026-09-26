@@ -1,0 +1,17 @@
+# O repositorio normaliza para LF. Com core.autocrlf=true (padrao no Windows)
+# o checkout converte para CRLF e os scripts .sh passam a falhar com
+# "bad interpreter: /usr/bin/env bash\r" -- o E2E inteiro depende deles.
+* text=auto eol=lf
+
+# Git Bash precisa destes dois sem CRLF, alem da normalizacao geral.
+*.sh text eol=lf
+scripts/run-e2e.ps1 text eol=crlf
+
+# Binarios que nao devem ser reinterpretados.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

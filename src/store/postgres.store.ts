@@ -1,0 +1,468 @@
+import type { PoolClient } from 'pg';
+import type {
+  AuditEntry,
+  Campaign,
+  ChannelAccount,
+  Post,
+  PublishJob,
+  Tenant,
+  User,
+  WhatsappTemplate,
+} from '../domain/types';
+import { closePool, withSystem, withTenant } from '../db/pool';
+import type { AccountInput, CampaignInput, JobInput, PostInput, Store, TemplateInput } from './types';
+
+type Row = Record<string, unknown>;
+
+const iso = (value: unknown): string =>
+  value instanceof Date ? value.toISOString() : String(value);
+
+const isoOrNull = (value: unknown): string | null => (value == null ? null : iso(value));
+
+const tenantIdOf = (row: Row): string => String(row.tenant_id);
+
+const mapTenant = (row: Row): Tenant => ({
+  id: String(row.id),
+  name: String(row.name),
+  slug: String(row.slug),
+  createdAt: iso(row.created_at),
+});
+
+const mapAccount = (row: Row): ChannelAccount => ({
+  id: String(row.id),
+  tenantId: tenantIdOf(row),
+  network: row.network as ChannelAccount['network'],
+  externalAccountId: String(row.external_account_id),
+  displayName: String(row.display_name),
+  encryptedSecret: String(row.encrypted_secret),
+  scopes: (row.scopes as string[]) ?? [],
+  status: row.status as ChannelAccount['status'],
+  tokenExpiresAt: isoOrNull(row.token_expires_at),
+  // provider_max_length pode chegar como string se o driver mudar, entao o
+  // Number() vai antes de comparar: Number(null) seria 0 e reprovaria todo
+  // post com texto nao vazio.
+  providerMaxLength: row.provider_max_length == null ? null : Number(row.provider_max_length),
+  providerRules: row.provider_rules == null ? null : String(row.provider_rules),
+  specsSyncedAt: isoOrNull(row.specs_synced_at),
+  createdAt: iso(row.created_at),
+});
+
+const mapCampaign = (row: Row): Campaign => ({
+  id: String(row.id),
+  tenantId: tenantIdOf(row),
+  name: String(row.name),
+  status: row.status as Campaign['status'],
+  createdAt: iso(row.created_at),
+});
+
+const mapPost = (row: Row): Post => ({
+  id: String(row.id),
+  tenantId: tenantIdOf(row),
+  campaignId: String(row.campaign_id),
+  contentType: String(row.content_type),
+  text: String(row.text),
+  media: (row.media as Post['media']) ?? [],
+  settings: (row.settings as Post['settings']) ?? {},
+  createdAt: iso(row.created_at),
+});
+
+const mapJob = (row: Row): PublishJob => ({
+  id: String(row.id),
+  tenantId: tenantIdOf(row),
+  postId: String(row.post_id),
+  channelAccountId: String(row.channel_account_id),
+  network: row.network as PublishJob['network'],
+  recipient: row.recipient == null ? null : String(row.recipient),
+  status: row.status as PublishJob['status'],
+  scheduledAt: iso(row.scheduled_at),
+  attempts: Number(row.attempts),
+  externalPostId: row.external_post_id == null ? null : String(row.external_post_id),
+  permalink: row.permalink == null ? null : String(row.permalink),
+  lastError: row.last_error == null ? null : String(row.last_error),
+  createdAt: iso(row.created_at),
+  updatedAt: iso(row.updated_at),
+});
+
+const mapTemplate = (row: Row): WhatsappTemplate => ({
+  id: String(row.id),
+  tenantId: tenantIdOf(row),
+  name: String(row.name),
+  languageCode: String(row.language_code),
+  category: row.category as WhatsappTemplate['category'],
+  status: row.status as WhatsappTemplate['status'],
+  headerType: row.header_type as WhatsappTemplate['headerType'],
+  variableCount: Number(row.variable_count),
+  createdAt: iso(row.created_at),
+});
+
+const mapUser = (row: Row): User => ({
+  id: String(row.id),
+  tenantId: tenantIdOf(row),
+  email: String(row.email),
+  passwordHash: String(row.password_hash),
+  role: row.role as User['role'],
+  status: row.status as User['status'],
+  createdAt: iso(row.created_at),
+});
+
+const mapAudit = (row: Row): AuditEntry => ({
+  id: String(row.id),
+  tenantId: tenantIdOf(row),
+  actorUserId: row.actor_user_id == null ? null : String(row.actor_user_id),
+  actorEmail: row.actor_email == null ? null : String(row.actor_email),
+  action: String(row.action),
+  entityType: String(row.entity_type),
+  entityId: row.entity_id == null ? null : String(row.entity_id),
+  metadata: (row.metadata as Record<string, unknown>) ?? {},
+  createdAt: iso(row.created_at),
+});
+
+const first = <T>(result: { rows: Row[] }, mapper: (row: Row) => T): T | undefined =>
+  result.rows[0] ? mapper(result.rows[0]) : undefined;
+
+export const createPostgresStore = (): Store => ({
+  createTenant: (input) =>
+    withSystem(async (client) => {
+      const result = await client.query(
+        'INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *',
+        [input.name, input.slug]
+      );
+      return mapTenant(result.rows[0]);
+    }),
+
+  getTenant: (id) =>
+    withSystem(async (client) => {
+      const result = await client.query('SELECT * FROM tenants WHERE id = $1', [id]);
+      return first(result, mapTenant);
+    }),
+
+  getTenantBySlug: (slug) =>
+    withSystem(async (client) => {
+      const result = await client.query('SELECT * FROM tenants WHERE slug = $1', [slug]);
+      return first(result, mapTenant);
+    }),
+
+  insertUser: (input) =>
+    withTenant(input.tenantId, async (client) => {
+      const result = await client.query(
+        `INSERT INTO users (tenant_id, email, password_hash, role, status)
+         VALUES ($1, $2, $3, $4, 'active')
+         RETURNING *`,
+        [input.tenantId, input.email.toLowerCase(), input.passwordHash, input.role]
+      );
+      return mapUser(result.rows[0]);
+    }),
+
+  findUserByEmail: (tenantId, email) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM users WHERE tenant_id = $1 AND email = $2 LIMIT 1',
+        [tenantId, email.toLowerCase()]
+      );
+      return first(result, mapUser);
+    }),
+
+  findUserById: (tenantId, id) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM users WHERE tenant_id = $1 AND id = $2 LIMIT 1',
+        [tenantId, id]
+      );
+      return first(result, mapUser);
+    }),
+
+  appendAudit: (input) =>
+    withTenant(input.tenantId, async (client) => {
+      await client.query(
+        `INSERT INTO audit_log (tenant_id, actor_user_id, actor_email, action, entity_type, entity_id, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+        [
+          input.tenantId,
+          input.actorUserId,
+          input.actorEmail,
+          input.action,
+          input.entityType,
+          input.entityId,
+          JSON.stringify(input.metadata),
+        ]
+      );
+    }),
+
+  listAudit: (tenantId, limit = 100) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM audit_log WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2',
+        [tenantId, limit]
+      );
+      return result.rows.map(mapAudit);
+    }),
+
+  listTenants: () =>
+    withSystem(async (client) => {
+      const result = await client.query('SELECT * FROM tenants ORDER BY created_at');
+      return result.rows.map(mapTenant);
+    }),
+
+  insertAccount: (input: AccountInput) =>
+    withTenant(input.tenantId, async (client) => {
+      const result = await client.query(
+        `INSERT INTO channel_accounts
+           (tenant_id, network, external_account_id, display_name, encrypted_secret, scopes, status, token_expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING *`,
+        [
+          input.tenantId,
+          input.network,
+          input.externalAccountId,
+          input.displayName,
+          input.encryptedSecret,
+          input.scopes,
+          input.status,
+          input.tokenExpiresAt,
+        ]
+      );
+      return mapAccount(result.rows[0]);
+    }),
+
+  updateAccountProviderSpec: (tenantId, id, spec) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE channel_accounts
+            SET provider_max_length = $3,
+                provider_rules = $4,
+                specs_synced_at = now()
+          WHERE tenant_id = $1 AND id = $2
+          RETURNING *`,
+        [tenantId, id, spec.maxLength, spec.rules]
+      );
+      return first(result, mapAccount);
+    }),
+
+  listAccounts: (tenantId) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM channel_accounts WHERE tenant_id = $1 ORDER BY created_at',
+        [tenantId]
+      );
+      return result.rows.map(mapAccount);
+    }),
+
+  getAccount: (tenantId, id) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM channel_accounts WHERE tenant_id = $1 AND id = $2',
+        [tenantId, id]
+      );
+      return first(result, mapAccount);
+    }),
+
+  updateAccountStatus: (tenantId, id, status) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'UPDATE channel_accounts SET status = $3 WHERE tenant_id = $1 AND id = $2 RETURNING *',
+        [tenantId, id, status]
+      );
+      return first(result, mapAccount);
+    }),
+
+  insertCampaign: (input: CampaignInput) =>
+    withTenant(input.tenantId, async (client: PoolClient) => {
+      const result = await client.query(
+        'INSERT INTO campaigns (tenant_id, name, status) VALUES ($1, $2, $3) RETURNING *',
+        [input.tenantId, input.name, input.status]
+      );
+      return mapCampaign(result.rows[0]);
+    }),
+
+  listCampaigns: (tenantId) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM campaigns WHERE tenant_id = $1 ORDER BY created_at',
+        [tenantId]
+      );
+      return result.rows.map(mapCampaign);
+    }),
+
+  getCampaign: (tenantId, id) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM campaigns WHERE tenant_id = $1 AND id = $2',
+        [tenantId, id]
+      );
+      return first(result, mapCampaign);
+    }),
+
+  insertPost: (input: PostInput) =>
+    withTenant(input.tenantId, async (client) => {
+      const result = await client.query(
+        `INSERT INTO posts (tenant_id, campaign_id, content_type, text, media, settings)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
+         RETURNING *`,
+        [
+          input.tenantId,
+          input.campaignId,
+          input.contentType,
+          input.text,
+          JSON.stringify(input.media),
+          JSON.stringify(input.settings),
+        ]
+      );
+      return mapPost(result.rows[0]);
+    }),
+
+  getPost: (tenantId, id) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query('SELECT * FROM posts WHERE tenant_id = $1 AND id = $2', [
+        tenantId,
+        id,
+      ]);
+      return first(result, mapPost);
+    }),
+
+  insertJob: (input: JobInput) =>
+    withTenant(input.tenantId, async (client) => {
+      const result = await client.query(
+        `INSERT INTO publish_jobs
+           (tenant_id, post_id, channel_account_id, network, recipient, status, scheduled_at,
+            attempts, external_post_id, permalink, last_error)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         RETURNING *`,
+        [
+          input.tenantId,
+          input.postId,
+          input.channelAccountId,
+          input.network,
+          input.recipient,
+          input.status,
+          input.scheduledAt,
+          input.attempts,
+          input.externalPostId,
+          input.permalink,
+          input.lastError,
+        ]
+      );
+      return mapJob(result.rows[0]);
+    }),
+
+  getJob: (tenantId, id) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM publish_jobs WHERE tenant_id = $1 AND id = $2',
+        [tenantId, id]
+      );
+      return first(result, mapJob);
+    }),
+
+  patchJob: (tenantId, id, patch) =>
+    withTenant(tenantId, async (client) => {
+      const assignments: string[] = [];
+      const values: unknown[] = [tenantId, id];
+      let position = 3;
+
+      const push = (column: string, value: unknown): void => {
+        assignments.push(`${column} = $${position}`);
+        values.push(value);
+        position += 1;
+      };
+
+      if (patch.status !== undefined) push('status', patch.status);
+      if (patch.attempts !== undefined) push('attempts', patch.attempts);
+      if (patch.externalPostId !== undefined) push('external_post_id', patch.externalPostId);
+      if (patch.permalink !== undefined) push('permalink', patch.permalink);
+      if (patch.lastError !== undefined) push('last_error', patch.lastError);
+      if (patch.scheduledAt !== undefined) push('scheduled_at', patch.scheduledAt);
+      if (patch.recipient !== undefined) push('recipient', patch.recipient);
+
+      if (assignments.length === 0) {
+        const current = await client.query(
+          'SELECT * FROM publish_jobs WHERE tenant_id = $1 AND id = $2',
+          [tenantId, id]
+        );
+        return first(current, mapJob);
+      }
+
+      push('updated_at', new Date().toISOString());
+
+      const result = await client.query(
+        `UPDATE publish_jobs SET ${assignments.join(', ')}
+         WHERE tenant_id = $1 AND id = $2
+         RETURNING *`,
+        values
+      );
+      return first(result, mapJob);
+    }),
+
+  listJobs: (tenantId, filter = {}) =>
+    withTenant(tenantId, async (client) => {
+      const conditions = ['tenant_id = $1'];
+      const values: unknown[] = [tenantId];
+      let position = 2;
+
+      if (filter.status) {
+        conditions.push(`status = $${position}`);
+        values.push(filter.status);
+        position += 1;
+      }
+
+      if (filter.campaignId) {
+        conditions.push(`post_id IN (SELECT id FROM posts WHERE campaign_id = $${position})`);
+        values.push(filter.campaignId);
+        position += 1;
+      }
+
+      const result = await client.query(
+        `SELECT * FROM publish_jobs WHERE ${conditions.join(' AND ')} ORDER BY created_at`,
+        values
+      );
+      return result.rows.map(mapJob);
+    }),
+
+  insertTemplate: (input: TemplateInput) =>
+    withTenant(input.tenantId, async (client) => {
+      const result = await client.query(
+        `INSERT INTO whatsapp_templates
+           (tenant_id, name, language_code, category, status, header_type, variable_count)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING *`,
+        [
+          input.tenantId,
+          input.name,
+          input.languageCode,
+          input.category,
+          input.status,
+          input.headerType,
+          input.variableCount,
+        ]
+      );
+      return mapTemplate(result.rows[0]);
+    }),
+
+  listTemplates: (tenantId) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM whatsapp_templates WHERE tenant_id = $1 ORDER BY created_at',
+        [tenantId]
+      );
+      return result.rows.map(mapTemplate);
+    }),
+
+  findTemplate: (tenantId, name, languageCode) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM whatsapp_templates WHERE tenant_id = $1 AND name = $2 AND language_code = $3 LIMIT 1',
+        [tenantId, name, languageCode]
+      );
+      return first(result, mapTemplate);
+    }),
+
+  updateTemplateStatus: (tenantId, id, status) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'UPDATE whatsapp_templates SET status = $3 WHERE tenant_id = $1 AND id = $2 RETURNING *',
+        [tenantId, id, status]
+      );
+      return first(result, mapTemplate);
+    }),
+
+  close: closePool,
+});

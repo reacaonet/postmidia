@@ -1,0 +1,182 @@
+name: postmidia-postiz
+
+# Stack de DESENVOLVIMENTO. Um unico Postgres e um unico Redis, compartilhados
+# com a aplicacao postmidia. Containers separados so para o que e microservico
+# de verdade (temporal) ou engine que nao cabe em Postgres (elasticsearch).
+#
+# Quando for para producao, cada servico ganha o seu banco/instance e o
+# compartilhamento deixa de valer. Aqui o objetivo e so rodar local.
+
+x-shared: &shared
+  networks: [postmidia]
+  restart: unless-stopped
+
+services:
+  # ------------------------------------------------------------ postgres -----
+  # UM postgres para o projeto inteiro: postmidia, postiz e temporal ficam em
+  # databases separados dentro do mesmo servidor. Databases separados, nao
+  # containers separados: e o que isola os schemas sem custar um container.
+  postgres:
+    <<: *shared
+    image: postgres:16-alpine
+    container_name: postmidia-postgres
+    environment:
+      POSTGRES_USER: postmidia
+      POSTGRES_PASSWORD: postmidia
+      POSTGRES_DB: postmidia
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Cria os databases dos outros servicos no boot inicial. O oficial so
+      # cria o POSTGRES_DB, entao o resto vem por aqui.
+      - ./scripts/postgres/init-databases.sh:/docker-entrypoint-initdb.d/10-init-databases.sh:ro
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postmidia -d postmidia"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ----------------------------------------------------------------- redis ---
+  # UM redis para o projeto inteiro, separado por db index:
+  #   db0 postmidia (fila BullMQ) | db1 postiz | db2 temporal
+  # Nenhum servico roda FLUSHALL, entao conviver e seguro.
+  redis:
+    <<: *shared
+    image: redis:7-alpine
+    container_name: postmidia-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    ports:
+      - "5638:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # --------------------------------------------------------------- postiz ----
+  postiz:
+    <<: *shared
+    image: ghcr.io/gitroomhq/postiz-app:latest
+    container_name: postiz
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      MAIN_URL: http://localhost:4007
+      FRONTEND_URL: http://localhost:4007
+      # A imagem le a URL do backend por NEXT_PUBLIC_BACKEND_URL. E o
+      # BACKEND_INTERNAL_URL que o nginx usa para falar com o Nest: tem que
+      # ficar 3000. Setar PORT=5000 aqui faz o Nest bindar em 5000 e o nginx
+      # passa a receber connection refused em 3000.
+      NEXT_PUBLIC_BACKEND_URL: http://localhost:4007/api
+      BACKEND_INTERNAL_URL: http://localhost:3000
+      JWT_SECRET: postiz-dev-jwt-secret-troque-em-producao-0000000000
+      DATABASE_URL: postgresql://postmidia:postmidia@postgres:5432/postiz
+      # Redis compartilhado, isolado por db index (db0 e o do postmidia).
+      REDIS_URL: redis://redis:6379/1
+      TEMPORAL_ADDRESS: temporal:7233
+      IS_GENERAL: "true"
+      DISABLE_REGISTRATION: "false"
+      RUN_CRON: "true"
+      STORAGE_PROVIDER: local
+      UPLOAD_DIRECTORY: /uploads
+      NEXT_PUBLIC_UPLOAD_DIRECTORY: /uploads
+      API_LIMIT: "30"
+    ports:
+      - "4007:5000"
+    volumes:
+      - postiz-uploads:/uploads
+    healthcheck:
+      # A imagem do Postiz nao tem wget, curl nem nc, entao o healthcheck usa o
+      # node que ja roda o Nest. A API publica responde 401 sem API key: e o
+      # sinal de que o backend subiu de verdade, e nao so o nginx escutando.
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:5000/api/public/v1/posts',r=>process.exit(r.statusCode===401||r.statusCode===403?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+
+  # -------------------------------------------------------------- temporal ---
+  # Microsservico de verdade (workflow engine): container proprio. Mas usa o
+  # Postgres e o Redis compartilhados, em database/db separados.
+  temporal:
+    <<: *shared
+    image: temporalio/auto-setup:1.28.1
+    container_name: temporal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: postmidia
+      POSTGRES_PWD: postmidia
+      POSTGRES_SEEDS: postgres
+      TEMPORAL_NAMESPACE: default
+      # A imagem usa DYNAMIC_CONFIG_FILE_PATH (nao DYNAMIC_CONFIG_FILE) e aborta
+      # se o arquivo nao existir. O volume monta o diretorio, nao o arquivo.
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+      # Visibilidade em Elasticsearch e obrigatoria: o limite de search
+      # attributes da visibilidade SQL e compilado em 3 do tipo Text, e o
+      # Postiz precisa de mais.
+      ENABLE_ES: "true"
+      ES_SEEDS: elasticsearch
+      ES_PORT: "9200"
+    ports:
+      - "7233:7233"
+    volumes:
+      - ./scripts/temporal-dynamicconfig:/etc/temporal/config/dynamicconfig:ro
+    healthcheck:
+      # tctl existe na imagem; nc nao. "running" sozinho nao prova nada, porque
+      # o auto-setup roda migrations e pode morrer logo depois de subir.
+      test: ["CMD-SHELL", "tctl --address temporal:7233 cluster health 2>/dev/null | grep -q SERVING"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  # --------------------------------------------------------- elasticsearch ---
+  # Engine de busca. Nao cabe em Postgres e o Temporal nao consegue aumentar o
+  # limite de search attributes, entao fica como container dedicado. Heap
+  # fixado em 256m, que ja e o que o compose oficial do Postiz usa.
+  elasticsearch:
+    <<: *shared
+    image: elasticsearch:7.17.27
+    container_name: postiz-elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms256m -Xmx256m
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9200/_cluster/health | grep -qE '\"status\":\"(yellow|green)\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+networks:
+  postmidia:
+    name: postmidia
+
+volumes:
+  postgres-data:
+    name: postmidia-postgres-data
+  redis-data:
+    name: postmidia-redis-data
+  elasticsearch-data:
+    name: postmidia-elasticsearch-data
+  postiz-uploads:
+    name: postmidia-postiz-uploads

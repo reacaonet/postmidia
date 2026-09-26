@@ -1,0 +1,125 @@
+import { z } from 'zod';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const envSchema = z.object({
+  PORT: z.coerce.number().default(8601),
+  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  JWT_SECRET: z.string().min(10).default('postmidia-dev-jwt-secret'),
+  JWT_TTL: z.string().default('12h'),
+  ALLOW_TENANT_HEADER: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+  ALLOW_SELF_SIGNUP: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+  RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).default(60_000),
+  RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().min(1).default(300),
+  TOKEN_ENCRYPTION_KEY: z
+    .string()
+    .regex(/^[0-9a-fA-F]{64}$/, 'TOKEN_ENCRYPTION_KEY deve ser 64 caracteres hex (32 bytes)'),
+  // 4007 e a porta que o docker-compose publica; 5000 e a interna do nginx.
+  POSTIZ_API_BASE_URL: z.string().url().default('http://localhost:4007/api/public/v1'),
+  POSTIZ_API_KEY: z.string().default(''),
+  TELEGRAM_BOT_TOKEN: z.string().default(''),
+  DATABASE_URL: z.string().default(''),
+  DATABASE_MIGRATION_URL: z.string().default(''),
+  DATABASE_APP_PASSWORD: z.string().default(''),
+  REDIS_URL: z.string().default(''),
+  PUBLISH_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(50).default(5),
+  PUBLISH_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(5),
+  PUBLISH_BACKOFF_BASE_MS: z.coerce.number().int().min(100).default(30_000),
+  EMBEDDED_WORKER: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((value) => value === 'true'),
+});
+
+const parsed = envSchema.safeParse(process.env);
+
+if (!parsed.success) {
+  console.error('Invalid environment variables:', parsed.error.flatten().fieldErrors);
+  process.exit(1);
+}
+
+export const env = parsed.data;
+export type Env = z.infer<typeof envSchema>;
+
+/** Segredos de exemplo que nunca devem chegar a producao. */
+const PLACEHOLDER_SECRETS = new Set([
+  'postmidia-dev-jwt-secret',
+  'change-me',
+  'changeme',
+  'secret',
+  'trocar',
+  'password',
+]);
+
+/**
+ * Invariantes que so importam em producao, verificadas uma vez no boot.
+ *
+ * Config invalida que nao trava o processo vira incidente em producao: um
+ * `JWT_SECRET` de exemplo significa que qualquer um forja token de admin, e uma
+ * `REDIS_URL` vazia significa que a fila para de agendar sem ninguem perceber.
+ * Por isso isso sai com codigo 1 e mensagem acionavel, nao com warning.
+ */
+export function assertProductionSafety(): void {
+  if (env.NODE_ENV !== 'production') return;
+
+  const blocking: string[] = [];
+  const warnings: string[] = [];
+
+  if (PLACEHOLDER_SECRETS.has(env.JWT_SECRET) || env.JWT_SECRET.length < 32) {
+    blocking.push(
+      'JWT_SECRET e fraco ou e um valor de exemplo. Gere um segredo proprio: openssl rand -hex 32'
+    );
+  }
+
+  if (/^0+$/.test(env.TOKEN_ENCRYPTION_KEY) || /^f+$/i.test(env.TOKEN_ENCRYPTION_KEY)) {
+    blocking.push(
+      'TOKEN_ENCRYPTION_KEY e a chave nula. Gere uma: openssl rand -hex 32. Trocar depois quebra os segredos ja cifrados.'
+    );
+  }
+
+  if (env.ALLOW_TENANT_HEADER) {
+    blocking.push(
+      'ALLOW_TENANT_HEADER nao pode ser true em producao: o header nao e assinado e permitiria forjar o tenant.'
+    );
+  }
+
+  if (!env.DATABASE_URL) {
+    blocking.push('DATABASE_URL nao definido: sem banco a API sobe e falha em toda requisicao.');
+  }
+
+  if (!env.REDIS_URL) {
+    blocking.push(
+      'REDIS_URL nao definido: a fila nao agenda nada. A API apenas sobe com a degradacao silenciosa.'
+    );
+  }
+
+  if (env.ALLOW_SELF_SIGNUP) {
+    warnings.push(
+      'ALLOW_SELF_SIGNUP=true cria tenants publicamente. Se o produto usa convite, desligue.'
+    );
+  }
+
+  if (!env.POSTIZ_API_KEY) {
+    warnings.push('POSTIZ_API_KEY vazio: os canais via Postiz vao falhar na publicacao.');
+  }
+
+  if (warnings.length > 0) {
+    console.warn('[aviso de producao]\n' + warnings.map((w) => `  - ${w}`).join('\n'));
+  }
+
+  if (blocking.length > 0) {
+    console.error(
+      '[configuracao invalida para producao]\n' +
+        blocking.map((b) => `  - ${b}`).join('\n')
+    );
+    process.exit(1);
+  }
+}
+
