@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { env } from '../../config';
 import { isRetryableStatus, PublishError } from '../adapter';
+import { quotaBucketOf, recordPostizCall } from './quota';
 import type {
   PostizCreatePayload,
   PostizCreateResponse,
@@ -20,6 +21,14 @@ const request = async <T>(
 ): Promise<T> => {
   if (!apiKey) {
     throw new PublishError('postiz_no_api_key', 'Conta sem credencial Postiz', false);
+  }
+
+  // Antes da chamada, e sem esperar por ela: o throttler do Postiz conta a
+  // requisicao assim que ela chega, entao um 500 tambem consome cota. Registrar
+  // depois da resposta -- ou apenas no sucesso -- subestimaria o consumo.
+  const bucket = quotaBucketOf(method, path);
+  if (bucket) {
+    void recordPostizCall(bucket).catch(() => undefined);
   }
 
   try {

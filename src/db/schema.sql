@@ -113,6 +113,21 @@ CREATE TABLE IF NOT EXISTS publish_jobs (
 -- falharia. O Upgrade precisa ser explicito e idempotente, como os de cima.
 ALTER TABLE publish_jobs ADD COLUMN IF NOT EXISTS release_id_missing BOOLEAN NOT NULL DEFAULT false;
 
+-- Momento da publicacao bem-sucedida.
+--
+-- `updated_at` nao serve para medir latencia: ele se move a cada patch, e o
+-- reconciliador patcha o job horas depois de publicado. Um job reconciliado a
+-- noite apareceria com "latencia" de horas, que mede a lentidao da reconciliacao
+-- e nao da publicacao. Este campo e escrito so no patch de sucesso -- um job
+-- republicado depois de um requeue sobrescreve, porque e uma publicacao nova --
+-- e a reconciliacao nunca o toca.
+ALTER TABLE publish_jobs ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ;
+
+-- Indice do recorte das metricas. A janela e sempre "ultimas 24h", entao e este
+-- indice que evita varrer a tabela inteira de publish_jobs a cada leitura de
+-- /ops/metrics.
+CREATE INDEX IF NOT EXISTS idx_publish_jobs_created_at ON publish_jobs (created_at);
+
 CREATE TABLE IF NOT EXISTS whatsapp_templates (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id UUID NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
@@ -240,6 +255,7 @@ CREATE POLICY tenant_isolation_publish_jobs ON publish_jobs
 -- `withSystem` nao autoriza gravar em nome de um tenant, entao toda alteracao
 -- de job continua passando por `withTenant(job.tenantId)`. Separar as duas coisas
 -- e o ponto -- leitura de sistema e bem mais barata de conceder do que escrita.
+DROP POLICY IF EXISTS system_read_publish_jobs ON publish_jobs;
 CREATE POLICY system_read_publish_jobs ON publish_jobs
   FOR SELECT
   USING (COALESCE(NULLIF(current_setting('app.is_system', true), '')::boolean, false));
@@ -247,6 +263,17 @@ CREATE POLICY system_read_publish_jobs ON publish_jobs
 CREATE POLICY tenant_isolation_dead_letter_jobs ON dead_letter_jobs
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+-- Mesma concessao de leitura de sistema, agora na fila morta. O painel
+-- operacional precisa contar DLQ em aberto da instalacao inteira, e sem esta
+-- policy a consulta voltaria VAZIA em vez de erro -- que e o pior desfecho
+-- possivel para um painel: "zero pendencias" quando o RLS simplesmente escondeu
+-- as linhas. Ler continua sendo cheap; escrever em nome de um tenant continua
+-- proibido para `withSystem`.
+DROP POLICY IF EXISTS system_read_dead_letter_jobs ON dead_letter_jobs;
+CREATE POLICY system_read_dead_letter_jobs ON dead_letter_jobs
+  FOR SELECT
+  USING (COALESCE(NULLIF(current_setting('app.is_system', true), '')::boolean, false));
 
 CREATE POLICY tenant_isolation_whatsapp_templates ON whatsapp_templates
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)

@@ -36,6 +36,8 @@ export const {
   patchJob,
   listJobs,
   listJobsPendingReconciliation,
+  getOpsMetrics,
+  getTenantOpsMetrics,
   upsertDeadLetter,
   listDeadLetters,
   getDeadLetter,

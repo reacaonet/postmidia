@@ -15,6 +15,7 @@ import type {
   AccountInput,
   CampaignInput,
   DeadLetterFilter,
+  OpsMetrics,
   JobInput,
   PostInput,
   Store,
@@ -91,6 +92,7 @@ const mapJob = (row: Row): PublishJob => ({
   lastError: row.last_error == null ? null : String(row.last_error),
   createdAt: iso(row.created_at),
   updatedAt: iso(row.updated_at),
+  publishedAt: isoOrNull(row.published_at),
 });
 
 const mapDeadLetter = (row: Row): DeadLetterJob => ({
@@ -148,6 +150,154 @@ const mapAudit = (row: Row): AuditEntry => ({
 const first = <T>(result: { rows: Row[] }, mapper: (row: Row) => T): T | undefined =>
   result.rows[0] ? mapper(result.rows[0]) : undefined;
 
+/**
+ * Le as metricas do painel operacional.
+ *
+ * O mesmo corpo serve a visao de sistema e a visao por tenant: o que muda e o
+ * `runner` (com `withSystem` ou `withTenant`) e o filtro opcional de tenant. Uma
+ * implementacao so, para as duas nao divergirem com o tempo -- dois codigos
+ * parecendo iguais que medem coisas diferentes e o modo classico de metricas que
+ * ninguem mais pode confiar.
+ *
+ * As cinco consultas sao separadas de proposito, e nao uma unica com JOINs: cada
+ * uma e uma leitura diferente, e um JOIN multiplicaria linhas e quebraria as
+ * contagens. A janela entra por parametro no SQL, nunca interpolada.
+ */
+const readOpsMetrics = async (
+  runner: <T>(fn: (client: PoolClient) => Promise<T>) => Promise<T>,
+  windowHours: number,
+  tenantId: string | null
+): Promise<OpsMetrics> => {
+  const hours = Math.max(1, Math.min(Math.floor(windowHours) || 24, 24 * 30));
+  // Quando ha tenant, ele e $1 e as horas sao $2; sem tenant, as horas viram $1.
+  // A janela entra sempre como parametro, nunca interpolada no texto.
+  const params: unknown[] = tenantId ? [tenantId, hours] : [hours];
+  const hoursPlaceholder = tenantId ? '$2' : '$1';
+  const windowClause = `created_at > now() - (${hoursPlaceholder} || ' hours')::interval`;
+  const volumeWhere = tenantId ? `tenant_id = $1 AND ${windowClause}` : windowClause;
+  const tenantScope = tenantId ? 'WHERE tenant_id = $1' : '';
+  const currentWhere = tenantId ? 'WHERE tenant_id = $1 AND' : 'WHERE';
+  const tenantParams: unknown[] = tenantId ? [tenantId] : [];
+
+  const data = await runner(async (client) => {
+      // `byStatus` NAO usa `volumeWhere`, e a distincao e deliberada: e o estado
+      // ATUAL da fila, nao o movimento do periodo. Um job travado ha tres dias
+      // continua sendo trabalho pendente hoje, e um painel que o escondesse depois
+      // do corte daria a impressao de fila vazia. O volume por rede, esse sim, e
+      // recorte -- sao registros de atividade, nao de estoque.
+      const byStatusResult = await client.query<{ status: string; total: string }>(
+        `SELECT status, COUNT(*)::text AS total FROM publish_jobs
+          ${tenantScope} GROUP BY status`,
+        tenantParams
+      );
+
+      const byNetworkResult = await client.query<{
+        network: string;
+        total: string;
+        succeeded: string;
+        failed: string;
+      }>(
+        `SELECT network,
+                COUNT(*)::text AS total,
+                COUNT(*) FILTER (WHERE status = 'succeeded')::text AS succeeded,
+                COUNT(*) FILTER (WHERE status = 'failed')::text AS failed
+           FROM publish_jobs
+          WHERE ${volumeWhere}
+          GROUP BY network
+          ORDER BY COUNT(*) DESC, network`,
+        params
+      );
+
+      // `percentile_cont` sobre o intervalo de publicacao, em segundos. Filtra
+      // por `published_at IS NOT NULL` porque so o sucesso o preenche; sem o
+      // filtro, os jobs nunca publicados entrariam com NULL e o percentil os
+      // ignoraria em silencio.
+      const latencyResult = await client.query<{
+        samples: string;
+        p50: string | null;
+        p95: string | null;
+        max: string | null;
+      }>(
+        `SELECT COUNT(*)::text AS samples,
+                percentile_cont(0.5) WITHIN GROUP (
+                  ORDER BY EXTRACT(EPOCH FROM (published_at - scheduled_at))
+                )::text AS p50,
+                percentile_cont(0.95) WITHIN GROUP (
+                  ORDER BY EXTRACT(EPOCH FROM (published_at - scheduled_at))
+                )::text AS p95,
+                MAX(EXTRACT(EPOCH FROM (published_at - scheduled_at)))::text AS max
+           FROM publish_jobs
+          WHERE ${volumeWhere}
+            AND published_at IS NOT NULL
+            AND status = 'succeeded'`,
+        params
+      );
+
+      // Estas tres nao usam a janela de volume: sao o estado atual da fila, e um
+      // job travado ha tres dias continua sendo trabalho pendente hoje.
+      const reconciliationResult = await client.query<{ total: string }>(
+        `SELECT COUNT(*)::text AS total FROM publish_jobs
+          ${currentWhere} release_id_missing`,
+        tenantParams
+      );
+
+      const deadLetterResult = await client.query<{ total: string }>(
+        `SELECT COUNT(*)::text AS total FROM dead_letter_jobs
+          ${currentWhere} resolution IS NULL`,
+        tenantParams
+      );
+
+      const tenantResult = tenantId
+        ? await client.query<{ name: string }>('SELECT name FROM tenants WHERE id = $1', [tenantId])
+        : { rows: [] as { name: string }[] };
+
+      return {
+        byStatus: byStatusResult.rows,
+        byNetwork: byNetworkResult.rows,
+        latency: latencyResult.rows[0] ?? { samples: '0', p50: null, p95: null, max: null },
+        reconciliation: reconciliationResult.rows[0]?.total ?? '0',
+        deadLetters: deadLetterResult.rows[0]?.total ?? '0',
+        tenantName: tenantResult.rows[0]?.name ?? null,
+      };
+    }
+  );
+
+  const toNumber = (value: string | null | undefined): number | null => {
+    if (value === null || value === undefined) {
+      return null;
+    }
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
+  return {
+    windowHours: hours,
+    generatedAt: new Date().toISOString(),
+    byStatus: Object.fromEntries(data.byStatus.map((row) => [row.status, Number(row.total)])),
+    byNetwork: data.byNetwork.map((row) => {
+      const total = Number(row.total);
+      const failed = Number(row.failed);
+      return {
+        network: row.network,
+        total,
+        succeeded: Number(row.succeeded),
+        failed,
+        failureRate: total > 0 ? Math.round((failed / total) * 10_000) / 10_000 : null,
+      };
+    }),
+    latency: {
+      samples: Number(data.latency.samples),
+      p50Seconds: toNumber(data.latency.p50),
+      p95Seconds: toNumber(data.latency.p95),
+      maxSeconds: toNumber(data.latency.max),
+    },
+    pendingReconciliation: Number(data.reconciliation),
+    openDeadLetters: Number(data.deadLetters),
+    tenantId,
+    tenantName: data.tenantName,
+  };
+};
+
 export const createPostgresStore = (): Store => ({
   /**
    * Jobs de todos os tenants que ainda nao receberam o id do provedor.
@@ -175,6 +325,10 @@ export const createPostgresStore = (): Store => ({
       );
       return result.rows.map(mapJob);
     }),
+
+  getOpsMetrics: (windowHours) => readOpsMetrics((fn) => withSystem(fn), windowHours, null),
+  getTenantOpsMetrics: (tenantId, windowHours) =>
+    readOpsMetrics((fn) => withTenant(tenantId, fn), windowHours, tenantId),
 
   createTenant: (input) =>
     withSystem(async (client) => {
@@ -428,6 +582,11 @@ export const createPostgresStore = (): Store => ({
       if (patch.scheduledAt !== undefined) push('scheduled_at', patch.scheduledAt);
       if (patch.recipient !== undefined) push('recipient', patch.recipient);
       if (patch.releaseIdMissing !== undefined) push('release_id_missing', patch.releaseIdMissing);
+      // Sempre sobrescrito pelo worker no patch de sucesso. Um job republicado
+      // depois de um requeue e uma publicacao nova, e e ela que a metrica deve
+      // medir. O que nao pode reescrever este campo e a reconciliacao, e ela
+      // simplesmente nao envia `publishedAt`.
+      if (patch.publishedAt !== undefined) push('published_at', patch.publishedAt);
 
       if (assignments.length === 0) {
         const current = await client.query(

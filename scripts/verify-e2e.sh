@@ -111,6 +111,14 @@ fi
 # proprio script configura.
 EMBEDDED_WORKER=false
 export EMBEDDED_WORKER
+
+# Token de plataforma conhecido, so para esta suite. O E2E precisa conseguir
+# tanto bater na rota quanto provar que ela NAO abre sozinha: sem token aqui, o
+# unico estado testavel seria o 503 de falha fechada, e o caminho de sucesso
+# ficaria sem cobertura.
+METRICS_TOKEN='e2e-metrics-token-de-teste-000000000000'
+export METRICS_TOKEN
+
 npx ts-node --transpile-only src/server.ts > /tmp/api.log 2>&1 &
 API_PID=$!
 
@@ -143,6 +151,8 @@ SIGNUP=$(curl -s -m 20 -X POST "$BASE/auth/signup" -H 'Content-Type: application
 TOKEN=$(printf '%s' "$SIGNUP" | j '.data.token')
 [ -n "$TOKEN" ] && ok "signup emitiu token" || { bad "signup sem token"; echo "$SIGNUP"; exit 1; }
 AUTH="Authorization: Bearer $TOKEN"
+TENANT=$(printf '%s' "$SIGNUP" | j '.data.user.tenantId')
+[ -n "$TENANT" ] && ok "signup identificou o tenant" || bad "signup sem tenantId"
 
 WA=$(curl -s -m 20 -X POST "$BASE/accounts" -H 'Content-Type: application/json' -H "$AUTH" \
   -d '{"network":"whatsapp","externalAccountId":"1234","displayName":"WABA","secret":"tok"}' | j '.data.id')
@@ -500,13 +510,57 @@ RECJOB2=$(cat "$RECFILE2" 2>/dev/null)
 CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X POST "$BASE/jobs/$RECJOB2/reconcile" -H "$AUTH")
 check "reconcile de job ja publicado (409)" "$CODE" "409"
 
+# --- 9b. painel operacional ---
+#
+# O ponto destes checks NAO e o 200: e o que acontece quando o gate falha. O
+# painel conta jobs de todos os tenants, entao proteger por `owner` mostraria a
+# fila inteira para o dono de qualquer loja. Aqui provamos que o JWT de tenant --
+# que e o que o dono de uma loja tem -- NAO abre o painel.
+echo ""
+echo "=== 9b. painel operacional (token de plataforma) ==="
+
+CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$BASE/ops/metrics")
+check "painel sem token (401)" "$CODE" "401"
+CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$BASE/ops/metrics" -H "x-metrics-token: errado")
+check "painel com token errado (401)" "$CODE" "401"
+CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$BASE/ops/metrics" -H "$AUTH")
+check "painel com JWT de tenant em vez do token (401)" "$CODE" "401"
+
+METRICS=$(curl -s -m 20 "$BASE/ops/metrics" -H "x-metrics-token: $METRICS_TOKEN")
+WINDOW=$(printf '%s' "$METRICS" | j '.data.windowHours')
+check "painel com o token de plataforma (200)" "$WINDOW" "24"
+check "o painel traz a janela padrao" "$WINDOW" "24"
+
+# O estado da quota vem em duas classes porque o Postiz cobra as duas de formas
+# diferentes, e o limite que aperta primeiro e o de upload.
+QUOTA_KEYS=$(printf '%s' "$METRICS" | j '.data.postizQuota.map(function (q) { return q.bucket }).sort().join()')
+check "a cota do Postiz vem nas duas classes" "$QUOTA_KEYS" "posts,uploads"
+UPLIMIT=$(printf '%s' "$METRICS" | j '.data.postizQuota.filter(function (q) { return q.bucket === "uploads" })[0].limit')
+check "o limite de upload e o menor (30/h)" "$UPLIMIT" "30"
+ALERT=$(printf '%s' "$METRICS" | j '.data.alerts.postizQuota')
+[ -n "$ALERT" ] && ok "o painel sinaliza o estado da cota ($ALERT)" || bad "painel sem alerta de cota"
+
+# O drilldown por tenant volta a ser leitura COMUM (RLS de tenant), e nao leitura
+# de sistema. Por isso precisa de um tenantId valido.
+DRILL=$(curl -s -m 20 "$BASE/ops/metrics?tenantId=$TENANT" -H "x-metrics-token: $METRICS_TOKEN" | j '.data.tenantId')
+check "drilldown por tenant" "$DRILL" "$TENANT"
+CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$BASE/ops/metrics?tenantId=nao-e-uuid" -H "x-metrics-token: $METRICS_TOKEN")
+check "drilldown com tenantId invalido (400)" "$CODE" "400"
+
+# O volume do painel tem de refletir os jobs que este E2E criou, e nao zero: um
+# painel que devolve 0 sem erro e o pior desfecho possivel -- mente calmamente.
+JOBS=$(printf '%s' "$METRICS" | j '.data.byStatus.succeeded || 0')
+[ "$JOBS" -gt 0 ] 2>/dev/null && ok "o painel conta os jobs publicados ($JOBS)" || bad "o painel nao contou nenhum job publicado"
+
 # O isolamento entre tenants nao e testado aqui: proving-lo pela API exigiria
 # um segundo signup, e o rate limit de /auth (20 por minuto por IP) ja foi
 # consumido de proposito na secao 5. A prova mais forte fica no
 # verify-dead-letter.ts, que consulta a fila morta com o papel da aplicacao
 # (postmidia_app) e confirma que a listagem e o get de outro tenant nao veem
 # nada -- e no verify-reconcile.ts, que confirma que a leitura de sistema
-# atravessa o RLS mas nao concede escrita cross-tenant.
+# atravessa o RLS mas nao concede escrita cross-tenant. No painel, o teste mais
+# forte de separacao e o `verify-metrics.ts`, que semeia dois tenants e prova
+# que a visao por tenant nao enxerga o vizinho.
 
 # A limpeza final e feita pelo trap de EXIT, que tambem cobre o caminho de erro.
 echo ""

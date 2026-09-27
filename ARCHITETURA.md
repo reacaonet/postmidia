@@ -101,6 +101,73 @@ job marcado ali seria uma busca sem fim. Daí `reconcilable`, que o adapter
 Postiz define como `releaseIdMissing && !uploadOnlyMode`, e que Telegram e
 WhatsApp deixam `false` porque publicam direto e não têm o que reconciliar.
 
+### D8 — O painel operacional não pode usar o JWT de tenant
+
+`GET /ops/metrics` conta jobs de **todos** os clientes. A primeira ideia foi
+`requireRole('owner')`, que é o que todo endpoint de tenant usa — e está errada.
+
+`owner` e `admin` são papéis **por tenant**: o dono de uma loja tem `owner` na
+própria loja. Uma rota global protegida por `owner` mostraria a fila inteira
+para o dono de qualquer loja. Não é um detalhe de implementação, é o formato do
+papel.
+
+O RLS não segura essa rota. A leitura dela é de sistema (`app.is_system`), e
+`withSystem` existe justamente para atravessar o RLS — foi ele que bridou
+`listJobsPendingReconciliation` na reconciliação. Um gate no código não pode
+"reaproveitar" a proteção do banco quando ele propio desligou a proteção.
+
+- **Descartado:** `requireRole('owner')`. Vaza a fila inteira.
+- **Descartado:** JWT de plataforma separado por instalação, com `aud` e
+  expiração. Dá trabalho de emissão e revogação para um segredo que muda na
+  prática quando alguém reinstala.
+- **Verificado:** token de plataforma estático em `METRICS_TOKEN`, comparação em
+  tempo constante, obrigatório no boot de produção e `503` (falha fechada) sem
+  ele. O E2E prova que o JWT de tenant **não** abre a rota, e o `verify:metrics`
+  semeia dois tenants e prova que a visão por tenant não enxerga o vizinho.
+
+Duas consequências que valem registrar:
+
+- **Sem agregado "todos os tenants lado a lado"** em `byTenant`. Uma lista
+  ordenada de volume por cliente é ela mesma um vazamento entre tenants, e o
+  operador pode escolher o tenant que quer investigar com `?tenantId=`, que
+  volta a ser leitura de tenant comum (`withTenant`, RLS normal).
+- **A leitura da fila morta em sistema exigiu policy nova**
+  (`system_read_dead_letter_jobs`, `FOR SELECT`). Sem ela a consulta do painel
+  não dava erro: o RLS escondia as linhas e o painel mostrava "zero pendências".
+  Um painel que mente calmamente é pior do que um painel quebrado, então
+  `verify:metrics` semeia uma DLQ e exige que as duas visões a contem.
+
+### D9 — Latência de publicação vem de `published_at`
+
+`updated_at` seria a coluna mais óbvia e estaria errada. A reconciliação patcha
+o job horas depois de publicado, e qualquer métrica derivada de `updated_at`
+passaria a medir a **lentidão da reconciliação**. `published_at` é escrito uma
+vez, no sucesso, e nunca mais muda.
+
+- **Verificado:** `verify:metrics` mede a latência, patcha o job como a
+  reconciliação faria, e exige que o p50 não se mova.
+
+`byStatus` também não usa a janela: é o estoque atual da fila, e um job travado
+há três dias continua sendo trabalho pendente hoje. O volume por rede é que é
+recortado — aquilo é registro de atividade, não de estoque.
+
+### D10 — A cota do Postiz é contada por classe, e conta tentativas
+
+O Postiz impõe 90/h em `POST /posts` e 30/h em `POST /upload-from-url`, e **não**
+cobra `GET /posts/:id/missing`. Três decisões seguem daí:
+
+- **Duas classes, não um contador só.** O limite que aperta primeiro é o de
+  upload (30 < 90), e um contador único esconderia isso.
+- **Conta tentativa, não sucesso.** Um 500 do provedor consome cota do mesmo
+  jeito, e é justamente a falha que mais repete.
+- **Janela deslizante em `ZSET` no Redis**, não `INCR` com TTL. `INCR`+`EXPIRE`
+  daria uma janela que reinicia no primeiro incremento e contaria errado na
+  virada de hora.
+
+Sem Redis o contador cai para memória do processo e o campo `tracked` diz `false`
+— o painel prefere mostrar "não rastreado" a mostrar um número que morre com o
+processo.
+
 ---
 
 ## 3. Componentes
@@ -759,7 +826,31 @@ em nome dela — o mesmo nível do resolve da DLQ, não uma leitura comum de job
 ```bash
 npm run verify:dead-letter   # 17 checks, exige DATABASE_URL
 npm run verify:reconcile     # 14 checks, exige DATABASE_URL
+npm run verify:metrics       # 15 checks, exige DATABASE_URL
 ```
+
+`verify:metrics` roda nos dois backends também, e é a bateria que mais importa
+quando o painel é global: semeia dois tenants e exige que a visão de sistema veja
+os dois, que a visão por tenant veja **só** o seu, e que os percentis em memória
+batam com o `percentile_cont` do Postgres. Divergir ali faria o mesmo número
+mudar conforme o backend — que é o modo clássico de métrica em que ninguém mais
+confia.
+
+Três armadilhas dessa bateria:
+
+- **A janela é sobre `created_at`, e `insertJob` carimba `now()`.** Um job semeado
+  com `scheduled_at` antigo está, para efeito de métrica, recém-criado. Envelhecer
+  o job de verdade é o que faz o recorte ser testável; o helper faz isso por SQL
+  dentro do mesmo `withTenant`, sem escalar privilégio.
+- **A latência de referência vem do dado, não da aritmética.** O seed recebe as
+  latências em segundos e as aplica sobre `scheduled_at`. A primeira versão
+  derivava `publishedAt` de um "agendado há X minutos" e produzia 480/600s em vez
+  de 120/240s — o check falhou com um p50 de 540s que parecia bug do Postgres e
+  era bug do teste.
+- **`METRICS_TOKEN` precisa existir antes do `config` ser importado**, e o
+  middleware lê `env.METRICS_TOKEN` a cada requisição, o que permite religar e
+  desligar o segredo em tempo de execução para provar a falha fechada sem subir
+  outro processo.
 
 Roda a mesma bateria nos dois backends. No Postgres ela prova o que só lá
 existe: RLS escondendo a fila morta dos demais tenants, `ON CONFLICT` realmente
@@ -775,11 +866,16 @@ o teste quiser. Todos os imports que leem o `env` são dinâmicos, feitos depois
 ajuste, porque import estático é hoisted e congelaria o `config` com o Postiz de
 verdade.
 
-O E2E (`scripts/run-e2e.ps1`, 60 checks) cobre a camada HTTP: 401 sem token,
+O E2E (`scripts/run-e2e.ps1`, 72 checks) cobre a camada HTTP: 401 sem token,
 404 em id inexistente, 400 em `action` inválida, os 409 de corrida, o requeue
 zerando `attempts`, o discard sem tocar no job, e os três filtros. O estado de
 "esgotou as tentativas" é semeado por `scripts/seed-dead-letter.ts`, porque
 esperar o backoff real do worker não cabe no tempo do teste.
+
+O painel entra no E2E em quatro checks que não são sobre o 200: sem token, com
+token errado, e **com o JWT de tenant no lugar do token de plataforma**. O
+terceiro é o que importa — é o cenário real de um dono de loja tentando olhar a
+fila dos outros.
 
 Duas armadilhas desse harness, ambas custaram tempo:
 
@@ -847,6 +943,7 @@ docker run -d --name postmidia-redis -p 6379:6379 redis:7-alpine
 | `DATABASE_MIGRATION_URL` | Só a migration. Papel dono das tabelas |
 | `DATABASE_APP_PASSWORD` | Senha do papel da aplicação |
 | `TOKEN_ENCRYPTION_KEY` | 64 hex. **Trocar invalida todos os segredos** |
+| `METRICS_TOKEN` | ≥32 chars. Token de plataforma do painel; obrigatório em produção |
 
 ---
 

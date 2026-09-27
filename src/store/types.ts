@@ -21,12 +21,14 @@ export type AccountInput = Omit<
   ChannelAccount,
   'id' | 'createdAt' | 'providerMaxLength' | 'providerRules' | 'specsSyncedAt'
 >;
-export type CampaignInput = Omit<Campaign, 'id' | 'createdAt'>;
-export type PostInput = Omit<Post, 'id' | 'createdAt'>;
+export type CampaignInput = Omit<Campaign, 'id' | 'createdAt'>;export type PostInput = Omit<Post, 'id' | 'createdAt'>;
 // `releaseIdMissing` fica de fora de proposito: um job recem-criado nunca esta
 // pendente de reconciliacao. O campo so faz sentido depois que o provedor
 // aceitou a publicacao, e quem o escreve e o worker, no patch do sucesso.
-export type JobInput = Omit<PublishJob, 'id' | 'createdAt' | 'updatedAt' | 'releaseIdMissing'>;
+export type JobInput = Omit<
+  PublishJob,
+  'id' | 'createdAt' | 'updatedAt' | 'releaseIdMissing' | 'publishedAt'
+>;
 export type TemplateInput = Omit<WhatsappTemplate, 'id' | 'createdAt'>;
 
 export interface JobFilter {
@@ -40,6 +42,48 @@ export interface DeadLetterFilter {
   limit?: number;
 }
 
+/** Volume de uma rede dentro da janela observada. */
+export interface NetworkVolume {
+  network: string;
+  total: number;
+  succeeded: number;
+  failed: number;
+  /** `failed / total`, arredondado a 4 casas; `null` quando nao houve volume. */
+  failureRate: number | null;
+}
+
+/**
+ * Latencia de publicacao, do agendamento ao sucesso, em segundos.
+ *
+ * Mede `published_at - scheduled_at`, que inclui a espera na fila e o backoff de
+ * retentativas. Nao e a latencia da chamada HTTP ao provedor, e nao deve ser lida
+ * como tal: e o tempo que o usuario esperou para o post aparecer.
+ */
+export interface PublishLatency {
+  samples: number;
+  p50Seconds: number | null;
+  p95Seconds: number | null;
+  maxSeconds: number | null;
+}
+
+export interface OpsMetrics {
+  /** Janela observada, de `created_at` ate agora. */
+  windowHours: number;
+  generatedAt: string;
+  /** Estado atual da fila, sem recorte: e o que o operador precisa ver primeiro. */
+  byStatus: Record<string, number>;
+  /** Volume por rede dentro da janela. */
+  byNetwork: NetworkVolume[];
+  latency: PublishLatency;
+  /** Jobs publicados que ainda aguardam o id do provedor. */
+  pendingReconciliation: number;
+  /** Entradas de fila morta em aberto, aguardando triagem. */
+  openDeadLetters: number;
+  /** `null` quando a leitura e de sistema; preenchido na visao por tenant. */
+  tenantId?: string | null;
+  tenantName?: string | null;
+}
+
 /** Limites autoritativos lidos do provedor (Fase 7). */
 export interface ProviderSpec {
   /** Limite de caracteres do provedor; null quando ele nao informa. */
@@ -47,7 +91,6 @@ export interface ProviderSpec {
   /** Texto de regras do provedor. Guardado para consulta, nao validado. */
   rules: string | null;
 }
-
 export interface Store {
   createTenant(input: { name: string; slug: string }): Promise<Tenant>;
   getTenant(id: string): Promise<Tenant | undefined>;
@@ -140,6 +183,17 @@ export interface Store {
     id: string,
     status: WhatsappTemplateStatus
   ): Promise<WhatsappTemplate | undefined>;
+
+  /**
+   * Painel operacional da instalacao inteira, e nao de um tenant.
+   *
+   * Por isso leitura de sistema (`withSystem`, so SELECT): sao numeros que
+   * atravessam tenants, e quem pode ver e a operacao -- nao qualquer owner de
+   * tenant, que e um papel por tenant e nao um papel de plataforma.
+   */
+  getOpsMetrics(windowHours: number): Promise<OpsMetrics>;
+  /** Mesma leitura, restrita a um tenant. */
+  getTenantOpsMetrics(tenantId: string, windowHours: number): Promise<OpsMetrics>;
 
   close(): Promise<void>;
 }

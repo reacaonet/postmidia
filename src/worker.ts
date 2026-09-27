@@ -133,6 +133,9 @@ const handleJob = async (job: PublishJob): Promise<void> => {
       // UPLOAD do TikTok nunca aparecera, e deixar aceso faria o reconciliador
       // consultar o Postiz para sempre em busca de algo que nao existe.
       releaseIdMissing: result.reconcilable,
+      // Mede a latencia de publicacao. `updated_at` nao serve: a reconciliacao
+      // patcha o job horas depois e o numero passaria a medir a reconciliacao.
+      publishedAt: new Date().toISOString(),
       lastError: result.releaseIdMissing
         ? 'publicado sem id do provedor; reconciliar via releaseIdMissing'
         : null,

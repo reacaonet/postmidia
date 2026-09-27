@@ -113,6 +113,14 @@ export interface PublishJob {
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Instante da primeira publicacao bem-sucedida, gravado uma unica vez.
+   *
+   * Nao serve `updatedAt` para medir latencia: a reconciliacao patcha o job
+   * horas depois de publicado, e o numero passaria a medir a lentidao da
+   * reconciliacao. Este campo nao e mais tocado depois do sucesso.
+   */
+  publishedAt: string | null;
 }
 
 export interface PostMetrics {

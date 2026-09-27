@@ -43,6 +43,11 @@ const envSchema = z.object({
   // quando a integracao tem refreshWait, entao um lote grande seguraria o
   // worker por minutos.
   RECONCILE_BATCH: z.coerce.number().int().min(1).max(50).default(5),
+  // Token de plataforma do painel operacional. Deliberadamente NAO e um JWT de
+  // tenant: as metricas atravessam tenants e `owner`/`admin` sao papeis por
+  // tenant. Vazio em dev mantem a rota fechada com 503, nunca aberta.
+  METRICS_TOKEN: z.string().default(''),
+  METRICS_WINDOW_HOURS: z.coerce.number().int().min(1).max(720).default(24),
   EMBEDDED_WORKER: z
     .enum(['true', 'false'])
     .default('true')
@@ -119,6 +124,17 @@ export function assertProductionSafety(): void {
 
   if (!env.POSTIZ_API_KEY) {
     warnings.push('POSTIZ_API_KEY vazio: os canais via Postiz vao falhar na publicacao.');
+  }
+
+  // O painel operacional e leitura que ATRAVESSA tenants, entao nao pode usar o
+  // JWT de tenant: `owner` e um papel por tenant, e qualquer owner leria a
+  // contagem de jobs de todos os outros. Da o token proprio de plataforma, e
+  // producao exige que ele exista em vez de confiar em "ninguem vai olhar".
+  if (!env.METRICS_TOKEN || env.METRICS_TOKEN.length < 32) {
+    blocking.push(
+      'METRICS_TOKEN ausente ou curto (minimo 32 caracteres): o painel operacional atravessa tenants ' +
+        'e nao pode ficar protegido so por JWT de tenant. Gere com openssl rand -hex 32.'
+    );
   }
 
   if (warnings.length > 0) {

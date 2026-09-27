@@ -109,10 +109,11 @@ reiniciar a API reinicia o consumidor da fila.
 ## Verificação
 
 ```bash
-.\scripts\run-e2e.ps1                                  # 60 checks, sobe API e worker
+.\scripts\run-e2e.ps1                                  # 72 checks, sobe API e worker
 npm run verify:provider-specs                          # 10 checks, sem Docker
 npm run verify:dead-letter                             # 17 checks, exige DATABASE_URL
 npm run verify:reconcile                               # 14 checks, exige DATABASE_URL
+npm run verify:metrics                                 # 15 checks, exige DATABASE_URL
 npm run verify:queue                                   # fila fora do HTTP
 npm run typecheck
 ```
@@ -146,6 +147,7 @@ endpoint sob `/auth` autenticado exige `Authorization: Bearer <token>`.
 | `GET` | `/jobs` | jobs com filtro por status e campanha |
 | `GET` | `/dead-letters` | fila morta; `?resolution=open\|requeued\|discarded` e `?limit=` |
 | `POST` | `/dead-letters/:id/resolve` | `{"action":"requeue"\|"discard"}`; exige `owner`/`admin` |
+| `GET` | `/ops/metrics` | painel operacional; exige `x-metrics-token`, **não** JWT de tenant |
 | `POST` | `/jobs/:id/reconcile` | força a busca do id do provedor; exige `owner`/`admin` |
 | `GET` `POST` | `/whatsapp/templates` | templates; hoje o status é manual |
 | `PATCH` | `/whatsapp/templates/:id/status` | muda o status do template |
@@ -169,6 +171,34 @@ curl -s -X POST localhost:8601/accounts -H "Authorization: Bearer $TOKEN" \
   -d '{"network":"whatsapp","externalAccountId":"1234","displayName":"WABA","secret":"tok"}'
 ```
 
+### Painel operacional
+
+```bash
+curl -s "localhost:8601/ops/metrics?windowHours=24" -H "x-metrics-token: $METRICS_TOKEN"
+curl -s "localhost:8601/ops/metrics?tenantId=<uuid>" -H "x-metrics-token: $METRICS_TOKEN"
+```
+
+Devolve volume e taxa de falha por rede, latência de publicação (p50/p95/máx),
+estado atual da fila, pendências de reconciliação, DLQ em aberto e o consumo de
+cota do Postiz com o alerta.
+
+Duas coisas sobre esse número merecem atenção:
+
+- **Latência vem de `published_at`, não de `updated_at`.** A reconciliação
+  patcha o job horas depois de publicado; medir por `updated_at` mediria a
+  lentidão da reconciliação, não da publicação. `verify:metrics` prova isso
+  patchando o job de propósito e exigindo que a latência não mude.
+- **`byStatus` não tem recorte de janela.** É o estoque atual da fila: um job
+  travado há três dias continua sendo trabalho pendente hoje. O volume por rede,
+  esse sim, é recortado pela janela.
+
+O gate é um token de plataforma (`METRICS_TOKEN`), e o motivo está em
+[ARCHITETURA.md](ARCHITETURA.md#o-painel-operacional-nao-pode-usar-o-jwt-de-tenant):
+`owner`/`admin` são papéis **por tenant**, e todo tenant tem um `owner`, então
+proteger a rota com eles mostraria a fila inteira para o dono de qualquer loja.
+O RLS não salva essa rota, porque a leitura dela é de sistema. Sem token a rota
+responde `503` — nunca liberada.
+
 ## Isolamento entre tenants
 
 Cada requisição autenticada carrega um tenant, e o isolamento é imposto pelo
@@ -189,6 +219,8 @@ e o boot **recusa** o processo em produção por causa disso.
 - Trocar `TOKEN_ENCRYPTION_KEY` depois invalida todos os segredos já cifrados.
 - `POSTIZ_API_KEY` é a chave do painel local do Postiz, não um segredo de
   produção. Ela vai no `.env` e nunca no git.
+- `METRICS_TOKEN` é o segredo do painel operacional: comparação em tempo
+  constante, obrigatório em produção, e a rota falha fechada sem ele.
 
 ## Estrutura
 

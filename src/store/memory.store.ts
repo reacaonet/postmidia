@@ -10,7 +10,98 @@ import type {
   User,
   WhatsappTemplate,
 } from '../domain/types';
-import type { Store } from './types';
+import type { OpsMetrics, Store } from './types';
+
+/**
+ * Percentil continuo, com interpolacao linear -- o mesmo calculo do
+ * `percentile_cont` do Postgres.
+ *
+ * A paridade importa: o fallback em memoria e o Postgres sao as duas
+ * implementacoes da mesma metrica, e um p95 divergente entre elas faria o numero
+ * mudar conforme o backend, sem ninguem entender o por que.
+ */
+const percentileCont = (sorted: number[], fraction: number): number | null => {
+  if (sorted.length === 0) {
+    return null;
+  }
+  if (sorted.length === 1) {
+    return sorted[0];
+  }
+  const rank = fraction * (sorted.length - 1);
+  const lower = Math.floor(rank);
+  const upper = Math.ceil(rank);
+  if (lower === upper) {
+    return sorted[lower];
+  }
+  return sorted[lower] + (rank - lower) * (sorted[upper] - sorted[lower]);
+};
+
+/**
+ * Monta as metricas a partir de colecoes em memoria, com a mesma semantica da
+ * versao SQL: volume por rede e latencia respeitam a janela; pendencias nao.
+ */
+const metricsFrom = (
+  allJobs: PublishJob[],
+  allDeadLetters: DeadLetterJob[],
+  windowHours: number,
+  tenantId: string | null,
+  tenantName: string | null
+): OpsMetrics => {
+  const hours = Math.max(1, Math.min(Math.floor(windowHours) || 24, 24 * 30));
+  const cutoff = Date.now() - hours * 3_600_000;
+  const inWindow = (stamp: string): boolean => new Date(stamp).getTime() > cutoff;
+
+  const byStatus: Record<string, number> = {};
+  for (const job of allJobs) {
+    byStatus[job.status] = (byStatus[job.status] ?? 0) + 1;
+  }
+
+  const windowJobs = allJobs.filter((job) => inWindow(job.createdAt));
+
+  const perNetwork = new Map<string, { total: number; succeeded: number; failed: number }>();
+  for (const job of windowJobs) {
+    const bucket = perNetwork.get(job.network) ?? { total: 0, succeeded: 0, failed: 0 };
+    bucket.total += 1;
+    if (job.status === 'succeeded') {
+      bucket.succeeded += 1;
+    }
+    if (job.status === 'failed') {
+      bucket.failed += 1;
+    }
+    perNetwork.set(job.network, bucket);
+  }
+
+  const samples = windowJobs
+    .filter((job) => job.status === 'succeeded' && job.publishedAt)
+    .map((job) => (new Date(job.publishedAt!).getTime() - new Date(job.scheduledAt).getTime()) / 1000)
+    .sort((a, b) => a - b);
+
+  return {
+    windowHours: hours,
+    generatedAt: new Date().toISOString(),
+    byStatus,
+    byNetwork: [...perNetwork.entries()]
+      .map(([network, bucket]) => ({
+        network,
+        total: bucket.total,
+        succeeded: bucket.succeeded,
+        failed: bucket.failed,
+        failureRate:
+          bucket.total > 0 ? Math.round((bucket.failed / bucket.total) * 10_000) / 10_000 : null,
+      }))
+      .sort((a, b) => b.total - a.total || a.network.localeCompare(b.network)),
+    latency: {
+      samples: samples.length,
+      p50Seconds: percentileCont(samples, 0.5),
+      p95Seconds: percentileCont(samples, 0.95),
+      maxSeconds: samples.length > 0 ? samples[samples.length - 1] : null,
+    },
+    pendingReconciliation: allJobs.filter((job) => job.releaseIdMissing).length,
+    openDeadLetters: allDeadLetters.filter((entry) => entry.resolution === null).length,
+    tenantId,
+    tenantName,
+  };
+};
 
 const newId = (): string => randomUUID();
 
@@ -176,6 +267,7 @@ export const createMemoryStore = (): Store => {
       const created: PublishJob = {
         ...input,
         releaseIdMissing: false,
+        publishedAt: null,
         id: newId(),
         createdAt: timestamp,
         updatedAt: timestamp,
@@ -327,6 +419,26 @@ export const createMemoryStore = (): Store => {
       const updated = { ...existing, status };
       templates.set(id, updated);
       return updated;
+    },
+
+    async getOpsMetrics(windowHours) {
+      return metricsFrom([...jobs.values()], [...deadLetters.values()], windowHours, null, null);
+    },
+
+    async getTenantOpsMetrics(tenantId, windowHours) {
+      const scoped = [...jobs.values()].filter((job) => job.tenantId === tenantId);
+      const scopedDeadLetters = [...deadLetters.values()].filter(
+        (entry) => entry.tenantId === tenantId
+      );
+      // Nome do tenant vem do proprio registro, e nao de um filtro por job: uma
+      // DLQ cujo job sumiu nao pode virar um furo na contagem do tenant.
+      return metricsFrom(
+        scoped,
+        scopedDeadLetters,
+        windowHours,
+        tenantId,
+        tenants.get(tenantId)?.name ?? null
+      );
     },
 
     async close() {

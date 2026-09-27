@@ -8,6 +8,7 @@ import accountRoutes from './accounts';
 import authRoutes from './auth';
 import campaignRoutes from './campaigns';
 import deadLetterRoutes from './dead-letters';
+import opsRoutes from './ops';
 import whatsappRoutes from './whatsapp';
 
 const router = Router();
@@ -52,6 +53,7 @@ router.use(accountRoutes);
 router.use(campaignRoutes);
 router.use(whatsappRoutes);
 router.use(deadLetterRoutes);
+router.use(opsRoutes);
 
 router.use((error: unknown, _req: unknown, res: any, _next: unknown) => {
   if (error instanceof ZodError) {
