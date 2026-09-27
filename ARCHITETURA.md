@@ -94,7 +94,12 @@ morto.
 
 O Postiz responde sucesso com `releaseId: "missing"` quando a plataforma não
 devolveu o id. Retry duplicaria a publicação. O `PublishResult` carrega
-`releaseIdMissing`: marca como sucesso e deixa o job reconciliável.
+`releaseIdMissing`: marca como sucesso e deixa o job reconciliável — com uma
+ressalva que só aparece na reconciliação: o marcador é gravado só quando o id
+ainda **pode** aparecer. No modo `UPLOAD` do TikTok ele não aparece nunca, e um
+job marcado ali seria uma busca sem fim. Daí `reconcilable`, que o adapter
+Postiz define como `releaseIdMissing && !uploadOnlyMode`, e que Telegram e
+WhatsApp deixam `false` porque publicam direto e não têm o que reconciliar.
 
 ---
 
@@ -155,7 +160,7 @@ erDiagram
 | `channel_accounts` | `UNIQUE (tenant_id, network, external_account_id)` | `encrypted_secret`; Fase 7: `provider_max_length`, `provider_rules`, `specs_synced_at` |
 | `campaigns` | `id` | |
 | `posts` | `campaign_id` | `media` e `settings` em `jsonb` |
-| `publish_jobs` | `post_id` | `recipient` para fan-out; índice `(status, scheduled_at)` |
+| `publish_jobs` | `post_id` | `recipient` para fan-out; índice `(status, scheduled_at)`; Fase 9: `release_id_missing` + índice parcial `WHERE release_id_missing` |
 | `dead_letter_jobs` | `job_id` | Fase 9. `UNIQUE (job_id)`, `resolution` anulável, `requeue_count`, `ON DELETE CASCADE` |
 | `whatsapp_templates` | `UNIQUE (tenant_id, name, language_code)` | Sem `UNIQUE` global, senão tenants colidem |
 
@@ -192,11 +197,19 @@ Errei esse contrato inteiro na primeira implementação. A tabela é a correçã
 
 ### Rate limits (Postiz)
 
-| Endpoint | Limite |
-|---|---|
-| `POST /posts` | 90/h por instância (100 no cloud) |
-| `POST /upload-from-url` | 30/h |
-| `GET /integration-settings/{id}` | 30/h |
+| Endpoint | Limite | Conta |
+|---|---|---|
+| `POST /posts` | 90/h por organização (100 no cloud) | `ThrottlerGuard` global do Postiz, chaveado por `org.id` + `_posts` |
+| `POST /upload-from-url` | 30/h | throttler do próprio controller |
+| `GET /integration-settings/{id}` | 30/h | throttler do próprio controller |
+| `GET /posts/{id}/missing` | **sem limite** | reconciliação; não é interceptado pelo throttler global |
+
+O detalhe que importa: o `ThrottlerBehindProxyGuard` só se aplica a
+`POST /public/v1/posts`. Consultar `GET /posts/{id}/missing` não gasta a cota de
+90/h. A reconciliação não é problema de *cota*, é de *tempo* — o
+`getMissingContent` pode renovar token e dormir 10s quando a integração tem
+`refreshWait` (timeout do client: 60s). Daí o `RECONCILE_BATCH` pequeno e o
+intervalo longo: o custo de reconciliar é latência do worker, não orçamento de API.
 
 **Impacto no produto:** ~2.160 jobs/dia no cloud, e o limite é **por instância,
 não por plano**. Não dá para tier por assinatura sem self-host com
@@ -625,7 +638,7 @@ Hoje as URLs são passadas ao Postiz, que baixa do lado dele. O upload-from-url
 
 ### Fase 9 — Observabilidade e operação ◐
 - [x] DLQ para jobs que estouraram as tentativas
-- [ ] Reconciliação de `releaseIdMissing`
+- [x] Reconciliação de `releaseIdMissing`
 - [ ] Métricas: jobs por tenant, taxa de falha por rede, latência de publicação
 - [ ] Alerta de quota do Postiz (90/h é pouco)
 
@@ -674,10 +687,78 @@ Ambas são janelas reais entre a leitura da triagem e o clique. A checagem de
 WhatsApp). Requeue dispara publicação real em massa, o que é mais forte que
 criar um post — e criar post é liberado a qualquer membro do tenant.
 
+#### Reconciliação de `releaseIdMissing` (implementada)
+
+O Postiz responde **sucesso** com `releaseId: 'missing'` quando a rede ainda não
+devolveu o id. Retry não serviria — republicaria o post, e o usuário veria o
+conteúdo duplicado. O caminho é perguntar o id depois, e o endpoint público
+`GET /posts/{id}/missing` existe para isso.
+
+Enquanto o id não chega, `external_post_id` guarda o id **interno do Postiz**, e
+não o id da rede. É por ele que a reconciliação encontra o post. A troca desse
+campo pelo id verdadeiro é o ponto do exercício.
+
+**Dois casos que não podem ser tratados igual.** O adapter Postiz marca
+`reconcilable` só quando `releaseIdMissing && !uploadOnlyMode`. No modo `UPLOAD`
+do TikTok o id não aparece nunca, então deixar o marcador aceso faria o
+reconciliador consultar o Postiz indefinidamente atrás de algo que não existe.
+O caso transitório marca; o permanente, não.
+
+| Decisão | Por quê |
+| --- | --- |
+| Marcador booleano, não derivar de `lastError` | `lastError` era um texto livre. Um job reconciliado precisa de um estado que a varredura possa filtrar no banco |
+| Índice parcial `WHERE release_id_missing` | A varredura é system-wide e roda sempre; sem o índice, ela paginaria a tabela inteira de `publish_jobs` |
+| Gravação só pelo `patchJob` de sucesso do worker | `insertJob` não aceita o marcador. Quem publica é o worker, e ele sabe se o id veio ou não |
+| Falha do Postiz não altera o job | O post **foi publicado**. Um 500 do Postiz não pode transformar sucesso em falha |
+| Varredura sequencial, lote pequeno | `getMissingContent` pode bloquear 10s. Concorrência alta viraria muitas requisições lentas ao mesmo Postiz |
+| Passadas não se sobrepõem | Sem a trava, um Postiz lento empilharia passadas, cada uma com seu lote |
+| Passada imediata no boot | Reinício é quando o backlog acumula. Esperar um intervalo inteiro atrasaria justamente o caso que importa |
+| Idempotente por construção | Reconciliar duas vezes não faz mal: o job já marcado não volta para a lista |
+
+**`reconciled` é decisão do adapter, não do worker.** Cada adapter diz se o id
+pode aparecer depois. Telegram e WhatsApp devolvem `false`: publicam direto na
+API deles, não passam pelo Postiz, e não têm o que reconciliar.
+
+**Leitura de sistema é uma permissão própria.** A varredura precisa enxergar o
+backlog de todos os tenants, e ela não pertence a nenhum. Isso é uma policy
+separada e restrita:
+
+```sql
+CREATE POLICY system_read_publish_jobs ON publish_jobs
+  FOR SELECT USING (COALESCE(NULLIF(current_setting('app.is_system', true), '')::boolean, false));
+```
+
+`FOR SELECT` é o ponto. A policy de tenant continua valendo para escrita: o papel
+da aplicação não tem `BYPASSRLS` e nenhuma policy deste esquema autoriza
+`withSystem` a **gravar** em nome de um tenant. Ler em todos os tenants e escrever
+em todos os tenants são permissões distintas, e a segunda nem existe — todo patch
+de job passa por `withTenant(job.tenantId)`. O `verify:reconcile` prova as duas
+metades, inclusive que um `UPDATE` cross-tenant via `withSystem` afeta 0 linhas.
+
+**Escopo do `withSystem` antigo.** Antes desta fase, todo `withSystem` só
+tocava a tabela `tenants`, que não tem RLS — a função nunca teve poder de
+atravessar uma tabela protegida. A primeira chamada a fazer isso foi esta, e o
+RLS devolveu **zero linhas em silêncio**, sem erro. Vale saber que "nenhuma
+linha" é o modo de falha do RLS, e ele se parece com "não havia nada pendente".
+
+#### Rotas de reconciliação
+
+| Rota | Papel | Respostas |
+| --- | --- | --- |
+| `POST /jobs/:id/reconcile` | `owner`/`admin` | `200` reconciliado · `202` ainda sem id · `404` job inexistente · `409` não `succeeded` ou já reconciliado · `502` falha do Postiz |
+
+`202` é resultado legítimo, não erro: o Postiz ainda não tem o id porque o
+provedor não processou. `502` só aparece quando a consulta ao Postiz falha — e o
+job segue `succeeded` e marcado, para a próxima passada.
+
+A rota exige `owner`/`admin` porque lê o segredo cifrado da conta e chama o Postiz
+em nome dela — o mesmo nível do resolve da DLQ, não uma leitura comum de job.
+
 #### Como rodar a verificação
 
 ```bash
 npm run verify:dead-letter   # 17 checks, exige DATABASE_URL
+npm run verify:reconcile     # 14 checks, exige DATABASE_URL
 ```
 
 Roda a mesma bateria nos dois backends. No Postgres ela prova o que só lá
@@ -686,7 +767,15 @@ atualizando em vez de duplicar, e a `ON DELETE CASCADE` presente no catálogo.
 A cascata é conferida no catálogo, e não apagando dados: o papel da aplicação
 não tem `DELETE` de propósito, e o teste não deve escalar privilégio.
 
-O E2E (`scripts/run-e2e.ps1`, 51 checks) cobre a camada HTTP: 401 sem token,
+O `verify:reconcile` sobe um **Postiz fake** numa porta livre e aponta
+`POSTIZ_API_BASE_URL` para ele. Sem isso a bateria só testaria o store, e a parte
+que importa — o que o Postiz devolve e o que o worker faz com isso — ficaria sem
+prova. É o mesmo caminho de rede do Postiz de verdade; só o destino responde o que
+o teste quiser. Todos os imports que leem o `env` são dinâmicos, feitos depois do
+ajuste, porque import estático é hoisted e congelaria o `config` com o Postiz de
+verdade.
+
+O E2E (`scripts/run-e2e.ps1`, 60 checks) cobre a camada HTTP: 401 sem token,
 404 em id inexistente, 400 em `action` inválida, os 409 de corrida, o requeue
 zerando `attempts`, o discard sem tocar no job, e os três filtros. O estado de
 "esgotou as tentativas" é semeado por `scripts/seed-dead-letter.ts`, porque
@@ -701,6 +790,15 @@ Duas armadilhas desse harness, ambas custaram tempo:
   0, um worker remanescente consome na hora, a publicação falha e a conta é
   marcada `expired` — o post seguinte levaria 422 e o teste passaria a medir
   outra coisa.
+
+**O que o E2E de reconciliação não cobre, e por quê.** O `200` e o `202`
+precisam de um post **real** no Postiz com `releaseId: 'missing'`, o que depende
+de uma integração social válida. O que o E2E cobre é o resto da rota: 401, 404,
+os dois 409, e o `502` quando o id interno semeado não existe no Postiz — que é
+o resultado que importa, porque um `200` ali significaria inventar o id de um post
+que nunca foi publicado. Os três desfechos do reconciliador (`reconciled`,
+`pending`, `error`) estão cobertos no `verify:reconcile`, contra o Postiz fake.
+O estado semeado vem de `scripts/seed-reconcile.ts`.
 
 ### Fase 10 — Produto ⬜
 - [ ] Onboarding de conexão por rede (Meta App Review, LinkedIn, TikTok)
@@ -726,6 +824,9 @@ npm run verify:provider-specs
 
 # Verificação da Fase 9 (fila morta; exige DATABASE_URL)
 npm run verify:dead-letter
+
+# Verificação da Fase 9 (reconciliação; exige DATABASE_URL, sobe Postiz fake)
+npm run verify:reconcile
 
 # Suíte HTTP completa. No Windows, use o runner: ele resolve os paths do
 # Git Bash e encerra processo órfão.

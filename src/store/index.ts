@@ -35,6 +35,7 @@ export const {
   getJob,
   patchJob,
   listJobs,
+  listJobsPendingReconciliation,
   upsertDeadLetter,
   listDeadLetters,
   getDeadLetter,

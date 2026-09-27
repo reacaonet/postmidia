@@ -87,6 +87,7 @@ const mapJob = (row: Row): PublishJob => ({
   attempts: Number(row.attempts),
   externalPostId: row.external_post_id == null ? null : String(row.external_post_id),
   permalink: row.permalink == null ? null : String(row.permalink),
+  releaseIdMissing: row.release_id_missing === true,
   lastError: row.last_error == null ? null : String(row.last_error),
   createdAt: iso(row.created_at),
   updatedAt: iso(row.updated_at),
@@ -148,6 +149,33 @@ const first = <T>(result: { rows: Row[] }, mapper: (row: Row) => T): T | undefin
   result.rows[0] ? mapper(result.rows[0]) : undefined;
 
 export const createPostgresStore = (): Store => ({
+  /**
+   * Jobs de todos os tenants que ainda nao receberam o id do provedor.
+   *
+   * Usa `withSystem` de proposito: a reconciliacao e uma tarefa de infra, nao
+   * uma acao de tenant, e precisa enxergar o backlog inteiro. A leitura e
+   * autorizada pela policy `system_read_publish_jobs` (FOR SELECT). A gravacao
+   * do id reconciliado nao passa por aqui, e sim por `withTenant(job.tenantId)`:
+   * o papel da aplicacao nao tem BYPASSRLS e nenhuma policy deste esquema
+   * autoriza `withSystem` a ESCREVER em nome de um tenant. Ler em todos os
+   * tenants e escrever em todos os tenants sao permissoes distintas de proposito.
+   *
+   * Alem disso, a operacao nao aceita tenant de quem chama: ela le os jobs,
+   * chama o Postiz em nome da CONTA que o job referencia e devolve o id do
+   * provedor. Nenhum dado de um tenant e exposto a outro: quem chama e o worker.
+   */
+  listJobsPendingReconciliation: (limit) =>
+    withSystem(async (client) => {
+      const result = await client.query(
+        `SELECT * FROM publish_jobs
+          WHERE release_id_missing
+          ORDER BY updated_at
+          LIMIT $1`,
+        [limit]
+      );
+      return result.rows.map(mapJob);
+    }),
+
   createTenant: (input) =>
     withSystem(async (client) => {
       const result = await client.query(
@@ -351,8 +379,8 @@ export const createPostgresStore = (): Store => ({
       const result = await client.query(
         `INSERT INTO publish_jobs
            (tenant_id, post_id, channel_account_id, network, recipient, status, scheduled_at,
-            attempts, external_post_id, permalink, last_error)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            attempts, external_post_id, permalink, last_error, release_id_missing)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false)
          RETURNING *`,
         [
           input.tenantId,
@@ -399,6 +427,7 @@ export const createPostgresStore = (): Store => ({
       if (patch.lastError !== undefined) push('last_error', patch.lastError);
       if (patch.scheduledAt !== undefined) push('scheduled_at', patch.scheduledAt);
       if (patch.recipient !== undefined) push('recipient', patch.recipient);
+      if (patch.releaseIdMissing !== undefined) push('release_id_missing', patch.releaseIdMissing);
 
       if (assignments.length === 0) {
         const current = await client.query(

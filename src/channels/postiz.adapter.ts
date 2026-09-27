@@ -84,6 +84,9 @@ export const createPostizAdapter = (network: Network): ChannelAdapter => ({
       externalPostId: releaseIdMissing ? postizPostId : releaseId,
       permalink: null,
       releaseIdMissing,
+      // No modo UPLOAD o TikTok nao devolve id em momento algum, entao o job
+      // fica com o id interno do Postiz e nao entra na fila de reconciliacao.
+      reconcilable: releaseIdMissing && !uploadOnlyMode,
       raw: response,
     };
   },

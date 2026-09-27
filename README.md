@@ -109,9 +109,10 @@ reiniciar a API reinicia o consumidor da fila.
 ## Verificação
 
 ```bash
-.\scripts\run-e2e.ps1                                  # 51 checks, sobe API e worker
+.\scripts\run-e2e.ps1                                  # 60 checks, sobe API e worker
 npm run verify:provider-specs                          # 10 checks, sem Docker
 npm run verify:dead-letter                             # 17 checks, exige DATABASE_URL
+npm run verify:reconcile                               # 14 checks, exige DATABASE_URL
 npm run verify:queue                                   # fila fora do HTTP
 npm run typecheck
 ```
@@ -145,6 +146,7 @@ endpoint sob `/auth` autenticado exige `Authorization: Bearer <token>`.
 | `GET` | `/jobs` | jobs com filtro por status e campanha |
 | `GET` | `/dead-letters` | fila morta; `?resolution=open\|requeued\|discarded` e `?limit=` |
 | `POST` | `/dead-letters/:id/resolve` | `{"action":"requeue"\|"discard"}`; exige `owner`/`admin` |
+| `POST` | `/jobs/:id/reconcile` | força a busca do id do provedor; exige `owner`/`admin` |
 | `GET` `POST` | `/whatsapp/templates` | templates; hoje o status é manual |
 | `PATCH` | `/whatsapp/templates/:id/status` | muda o status do template |
 
@@ -208,9 +210,9 @@ cada, e o par Redis/Postgres é o caminho de verdade.
 
 ## Estado
 
-Fases 0 a 7 implementadas e verificadas. A 9 começou: a **DLQ está pronta**
-(tabela, RLS, store, worker, rotas e testes), e faltam reconciliação de
-`releaseIdMissing`, métricas e alerta de quota. A 6 e a 8 estão parciais por
-dependerem de credenciais ou de decisões de produto, e a 10 depende de produto.
-O que falta e o que está bloqueado está em
+Fases 0 a 7 implementadas e verificadas. Na 9, a **DLQ e a reconciliação de
+`releaseIdMissing` estão prontas** (tabela, RLS, store, worker, rotas e testes);
+faltam métricas e alerta de quota. A 6 e a 8 estão parciais por dependerem de
+credenciais ou de decisões de produto, e a 10 depende de produto. O que falta e o
+que está bloqueado está em
 [ARCHITETURA.md](ARCHITETURA.md#7-etapas-do-projeto).

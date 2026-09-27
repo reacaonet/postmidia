@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit",
     "verify:provider-specs": "ts-node --transpile-only scripts/verify-provider-specs.ts",
     "verify:dead-letter": "ts-node --transpile-only scripts/verify-dead-letter.ts",
+    "verify:reconcile": "ts-node --transpile-only scripts/verify-reconcile.ts",
     "verify:queue": "ts-node --transpile-only scripts/verify-queue.ts"
   },
   "dependencies": {

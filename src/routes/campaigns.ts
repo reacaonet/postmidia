@@ -6,6 +6,7 @@ import { decryptSecret } from '../security/secret-box';
 import {
   getAccount,
   getCampaign,
+  getJob,
   insertCampaign,
   insertJob,
   insertPost,
@@ -17,6 +18,7 @@ import type { PublishJobStatus, ResolvedChannelAccount } from '../domain/types';
 import { requireRole, requireTenant, type AuthenticatedRequest, type TenantRequest } from '../http/tenant';
 import { asyncHandler } from '../http/async-handler';
 import { appendAudit } from '../store';
+import { reconcileJob } from '../reconcile';
 import { queue } from '../worker';
 
 const router = Router();
@@ -245,6 +247,77 @@ router.get(
         status: status ?? undefined,
         campaignId: campaignId ?? undefined,
       }),
+    });
+  })
+);
+
+/**
+ * Forca a reconciliacao de um job publicado sem id do provedor.
+ *
+ * A varredura periodica (RECONCILE_ENABLED) cuida do caso comum. Esta rota
+ * existe para quando o operador ja sabe qual post e nao quer esperar o
+ * intervalo, e para reconciliar um job que a varredura idade ja desistiu de
+ * consultar.
+ */
+router.post(
+  '/jobs/:id/reconcile',
+  requireTenant,
+  // Le o segredo da conta e chama o Postiz em nome dela: e o mesmo nivel de
+  // acesso da fila morta, nao uma leitura comum de job.
+  requireRole('owner', 'admin'),
+  asyncHandler(async (req, res) => {
+    const tenantId = (req as TenantRequest).tenantId;
+    const job = await getJob(tenantId, req.params.id);
+
+    if (!job) {
+      res.status(404).json({ success: false, error: 'Job nao encontrado' });
+      return;
+    }
+
+    if (job.status !== 'succeeded') {
+      res.status(409).json({
+        success: false,
+        error: `Job em ${job.status}; so job publicado tem id do provedor a reconciliar`,
+      });
+      return;
+    }
+
+    if (!job.releaseIdMissing) {
+      res.status(409).json({
+        success: false,
+        error: 'Job ja tem o id do provedor, ou nao é reconciliável',
+        data: { externalPostId: job.externalPostId, permalink: job.permalink },
+      });
+      return;
+    }
+
+    const outcome = await reconcileJob(job);
+
+    if (outcome === 'skipped') {
+      res.status(409).json({ success: false, error: 'Job sem id interno do Postiz para consultar' });
+      return;
+    }
+
+    const updated = await getJob(tenantId, job.id);
+
+    // `pending` e um resultado legitimo, nao um erro: o Postiz ainda nao tem o
+    // id porque o provedor nao processou. 202 diz "aceito, ainda nao ha id".
+    if (outcome === 'pending') {
+      res.status(202).json({
+        success: true,
+        data: { outcome, externalPostId: updated?.externalPostId ?? null, permalink: updated?.permalink ?? null },
+      });
+      return;
+    }
+
+    if (outcome === 'error') {
+      res.status(502).json({ success: false, error: 'Falha ao consultar o Postiz' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      data: { outcome, externalPostId: updated?.externalPostId ?? null, permalink: updated?.permalink ?? null },
     });
   })
 );

@@ -7,6 +7,7 @@ import type {
   PostizIntegrationSettings,
   PostizIntegrationSummary,
   PostizMediaFile,
+  PostizMissingContent,
 } from './types';
 
 const client = axios.create({ timeout: 60_000 });
@@ -103,3 +104,27 @@ export const postizIntegrationSettings = (
 export const postizListIntegrations = (
   apiKey: string
 ): Promise<PostizIntegrationSummary[]> => request<PostizIntegrationSummary[]>(apiKey, 'get', '/integrations');
+
+/**
+ * Procura o id que o provedor ainda nao devolveu para um post.
+ *
+ * O Postiz responde `[]` em tres casos distintos, e a distincao importa:
+ * o post ja foi resolvido (`releaseId` deixou de ser `'missing'`), a rede nao
+ * tem handler de missing, ou o provedor ainda nao processou. O chamador trata
+ * `[]` como "nada a fazer agora" e tenta de novo na proxima passada; nenhum
+ * desses casos e erro.
+ *
+ * Este endpoint NAO conta para o orcamento de 90/h: o ThrottlerGuard global do
+ * Postiz so intercepta `POST /public/v1/posts`. O risco real aqui e o tempo --
+ * `getMissingContent` pode renovar token e, em integrations com `refreshWait`,
+ * dormir 10s dentro da chamada.
+ */
+export const postizGetMissingContent = (
+  apiKey: string,
+  postId: string
+): Promise<PostizMissingContent[]> =>
+  request<PostizMissingContent[]>(
+    apiKey,
+    'get',
+    `/posts/${encodeURIComponent(postId)}/missing`
+  );

@@ -23,7 +23,10 @@ export type AccountInput = Omit<
 >;
 export type CampaignInput = Omit<Campaign, 'id' | 'createdAt'>;
 export type PostInput = Omit<Post, 'id' | 'createdAt'>;
-export type JobInput = Omit<PublishJob, 'id' | 'createdAt' | 'updatedAt'>;
+// `releaseIdMissing` fica de fora de proposito: um job recem-criado nunca esta
+// pendente de reconciliacao. O campo so faz sentido depois que o provedor
+// aceitou a publicacao, e quem o escreve e o worker, no patch do sucesso.
+export type JobInput = Omit<PublishJob, 'id' | 'createdAt' | 'updatedAt' | 'releaseIdMissing'>;
 export type TemplateInput = Omit<WhatsappTemplate, 'id' | 'createdAt'>;
 
 export interface JobFilter {
@@ -88,6 +91,17 @@ export interface Store {
   getJob(tenantId: string, id: string): Promise<PublishJob | undefined>;
   patchJob(tenantId: string, id: string, patch: Partial<PublishJob>): Promise<PublishJob | undefined>;
   listJobs(tenantId: string, filter?: JobFilter): Promise<PublishJob[]>;
+
+  /**
+   * Jobs de qualquer tenant que publicaram mas ainda nao tem o id do provedor.
+   *
+   * E de sistema, nao de tenant: a reconciliacao e tarefa de infra. A leitura
+   * atravessa o RLS de proposito (o worker nao pertence a um tenant), mas cada
+   * job so e reconciliado em nome da conta que o proprio job referencia.
+   * Ordenado por `updated_at` para que o mais antigo nao fique para tras
+   * quando houver mais pendentes que o limite do lote.
+   */
+  listJobsPendingReconciliation(limit: number): Promise<PublishJob[]>;
 
   /**
    * Coloca o job na fila morta. Idempotente por `jobId`: um novo dead-letter do

@@ -450,12 +450,63 @@ check "entrada descartada visivel no filtro" "$DLQD" "1"
 DLQR2=$(curl -s -m 20 "$BASE/dead-letters?resolution=requeued" -H "$AUTH" | j '.data.length')
 check "entrada reagendada visivel no filtro" "$DLQR2" "1"
 
+# --- Secao 11: reconciliacao de releaseIdMissing ---
+t "inicio da secao 11"
+
+# O caminho feliz da reconciliacao (200) e o 202 nao sao testaveis aqui: exigem um
+# post REAL no Postiz com `releaseId: 'missing'`, o que depende de uma integracao
+# social valida. O verify-reconcile.ts cobre os tres desfechos (reconciled,
+# pending, error) contra um Postiz fake, no mesmo caminho de codigo. O que falta
+# aqui e so a camada HTTP em volta deles.
+
+RECFILE=/tmp/rec-job.txt
+npx ts-node --transpile-only scripts/seed-reconcile.ts "$SLUG" "$DLQJOB2" "$(cygpath -w "$RECFILE")" 2>/tmp/seed-rec.log
+RECJOB=$(cat "$RECFILE" 2>/dev/null)
+t "seeding da reconciliacao: '$RECJOB'"
+[ -n "$RECJOB" ] && ok "job pendente de reconciliacao semeado" || { bad "seeding da reconciliacao falhou: $(cat /tmp/seed-rec.log)"; exit 1; }
+
+# O job semeado aparece marcado na listagem de jobs.
+RECMARK=$(curl -s -m 20 "$BASE/jobs" -H "$AUTH" | j ".data.filter(x=>x.id==='$RECJOB')[0].releaseIdMissing")
+check "job sem id do provedor aparece marcado" "$RECMARK" "true"
+
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X POST "$BASE/jobs/$RECJOB/reconcile" -H 'Content-Type: application/json')
+check "reconcile sem token (401)" "$CODE" "401"
+
+# O id interno do Postiz semeado nao existe la. A rota tem de propagar a falha
+# como 502 -- e nao devolver 200 com um id inventado, que seria um "publicado"
+# que nunca existiu.
+CODE=$(curl -s -m 60 -o /tmp/rec-body.json -w '%{http_code}' -X POST "$BASE/jobs/$RECJOB/reconcile" -H "$AUTH")
+check "reconcile com Postiz inacessivel (502)" "$CODE" "502"
+
+# Falha do Postiz nao pode virar falha de publicacao: o job foi publicado.
+RECSTAT=$(curl -s -m 20 "$BASE/jobs" -H "$AUTH" | j ".data.filter(x=>x.id==='$RECJOB')[0].status")
+check "falha ao reconciliar nao desatende o job" "$RECSTAT" "succeeded"
+RECMARK2=$(curl -s -m 20 "$BASE/jobs" -H "$AUTH" | j ".data.filter(x=>x.id==='$RECJOB')[0].releaseIdMissing")
+check "job segue marcado para a proxima passada" "$RECMARK2" "true"
+
+# 404 para job que nao existe, e 409 para os dois ramos de "nao reconciliavel":
+# job que nao terminou de publicar, e job publicado que ja tem o id do provedor.
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X POST "$BASE/jobs/00000000-0000-0000-0000-000000000000/reconcile" -H "$AUTH")
+check "reconcile de job inexistente (404)" "$CODE" "404"
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X POST "$BASE/jobs/$DLQJOB/reconcile" -H "$AUTH")
+check "reconcile de job que nao terminou de publicar (409)" "$CODE" "409"
+
+# O terceiro job da fila morta ainda esta `failed`; reusa-se so para chegar no
+# estado publicado, agora com id de provedor e sem marcador.
+RECFILE2=/tmp/rec-job-2.txt
+npx ts-node --transpile-only scripts/seed-reconcile.ts "$SLUG" "$DLQJOB3" "$(cygpath -w "$RECFILE2")" --unmarked >/dev/null 2>&1
+RECJOB2=$(cat "$RECFILE2" 2>/dev/null)
+[ -n "$RECJOB2" ] || { bad "seeding do job ja publicado falhou"; exit 1; }
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X POST "$BASE/jobs/$RECJOB2/reconcile" -H "$AUTH")
+check "reconcile de job ja publicado (409)" "$CODE" "409"
+
 # O isolamento entre tenants nao e testado aqui: proving-lo pela API exigiria
 # um segundo signup, e o rate limit de /auth (20 por minuto por IP) ja foi
 # consumido de proposito na secao 5. A prova mais forte fica no
 # verify-dead-letter.ts, que consulta a fila morta com o papel da aplicacao
 # (postmidia_app) e confirma que a listagem e o get de outro tenant nao veem
-# nada.
+# nada -- e no verify-reconcile.ts, que confirma que a leitura de sistema
+# atravessa o RLS mas nao concede escrita cross-tenant.
 
 # A limpeza final e feita pelo trap de EXIT, que tambem cobre o caminho de erro.
 echo ""

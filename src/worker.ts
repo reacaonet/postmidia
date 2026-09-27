@@ -5,6 +5,7 @@ import { PublishError, type PublishSpec } from './channels/adapter';
 import { queue } from './queue';
 import { decryptSecret } from './security/secret-box';
 import { appendAudit, getAccount, getJob, getPost, patchJob, updateAccountStatus, upsertDeadLetter } from './store';
+import { startReconciler, stopReconciler } from './reconcile';
 import type { PublishJob, ResolvedChannelAccount } from './domain/types';
 
 
@@ -128,6 +129,10 @@ const handleJob = async (job: PublishJob): Promise<void> => {
       status: 'succeeded',
       externalPostId: result.externalPostId,
       permalink: result.permalink,
+      // O marcador so fica ligado quando o id ainda pode aparecer. No modo
+      // UPLOAD do TikTok nunca aparecera, e deixar aceso faria o reconciliador
+      // consultar o Postiz para sempre em busca de algo que nao existe.
+      releaseIdMissing: result.reconcilable,
       lastError: result.releaseIdMissing
         ? 'publicado sem id do provedor; reconciliar via releaseIdMissing'
         : null,
@@ -145,6 +150,7 @@ const handleJob = async (job: PublishJob): Promise<void> => {
         externalPostId: result.externalPostId,
         permalink: result.permalink,
         releaseIdMissing: result.releaseIdMissing ?? false,
+        reconcilable: result.reconcilable ?? false,
         attempts,
       },
     }).catch((auditError: unknown) => {
@@ -206,9 +212,14 @@ const startWorker = (): void => {
   bootstrapAdapters();
   queue.start(handleJob);
   console.log('[worker] worker de publicacao iniciado');
+  // O reconciliador mora no worker porque e ele que tem o segredo da conta e
+  // o Postiz ja aberto. So o worker liga a varredura; a API e o frontend nao
+  // tem o que reconciliar.
+  startReconciler();
 };
 
 const shutdown = async (): Promise<void> => {
+  stopReconciler();
   await queue.close();
   process.exit(0);
 };

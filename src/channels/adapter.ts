@@ -13,7 +13,17 @@ export interface PublishSpec {
 export interface PublishResult {
   externalPostId: string;
   permalink: string | null;
+  /** O provedor aceitou, mas nao devolveu o id do post. */
   releaseIdMissing: boolean;
+  /**
+   * Ainda pode aparecer um id depois. Distingue o caso transitorio (a rede
+   * processa e o Postiz recebe o id na proxima varredura) do permanente
+   * (TikTok em modo UPLOAD so envia o arquivo e nunca devolve id).
+   *
+   * Sem essa separacao, o reconciliador varreria para sempre um job que nunca
+   * vai reconciliar, gastando chamada ao Postiz a cada passada.
+   */
+  reconcilable: boolean;
   raw: unknown;
 }
 

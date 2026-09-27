@@ -64,7 +64,24 @@ export const withTenant = async <T>(tenantId: string, fn: (client: PoolClient) =
     }
   });
 
-export const withSystem = <T>(fn: (client: PoolClient) => Promise<T>): Promise<T> => withClient(fn);
+export const withSystem = async <T>(fn: (client: PoolClient) => Promise<T>): Promise<T> =>
+  withClient(async (client) => {
+    await assertRlsEnforced();
+    await client.query('BEGIN');
+    try {
+      // `app.tenant_id` limpo de proposito: a conexao volta do pool para dentro
+      // de outra transacao, e um tenant la esquecido restringiria a leitura de
+      // sistema em vez de abre-la.
+      await client.query("SELECT set_config('app.tenant_id', '', true)");
+      await client.query("SELECT set_config('app.is_system', 'true', true)");
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    }
+  });
 
 export const closePool = async (): Promise<void> => {
   await pool.end();

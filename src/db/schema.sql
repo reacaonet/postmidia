@@ -96,9 +96,22 @@ CREATE TABLE IF NOT EXISTS publish_jobs (
   external_post_id TEXT,
   permalink TEXT,
   last_error TEXT,
+  -- O provedor aceitou a publicacao mas nao devolveu o id do post. Enquanto
+  -- isso for reconciliavel, external_post_id guarda o id INTERNO do Postiz, e
+  -- nao o id da rede: e por ele que a reconciliacao procura o id verdadeiro.
+  --
+  -- E uma coluna, e nao um texto em last_error, porque a reconciliacao precisa
+  -- CONSULTAR quais jobs estao pendentes. Marker em texto exigiria dar parse
+  -- de string livre para decidir o que reprocessar.
+  release_id_missing BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- `CREATE TABLE IF NOT EXISTS` nao acrescenta coluna em tabela que ja existe:
+-- numa base migrada antes, o publish_jobs ficaria sem a coluna e o INSERT
+-- falharia. O Upgrade precisa ser explicito e idempotente, como os de cima.
+ALTER TABLE publish_jobs ADD COLUMN IF NOT EXISTS release_id_missing BOOLEAN NOT NULL DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS whatsapp_templates (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -153,6 +166,10 @@ CREATE INDEX IF NOT EXISTS idx_campaigns_tenant ON campaigns (tenant_id);
 CREATE INDEX IF NOT EXISTS idx_posts_campaign ON posts (tenant_id, campaign_id);
 CREATE INDEX IF NOT EXISTS idx_publish_jobs_due ON publish_jobs (status, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_publish_jobs_tenant ON publish_jobs (tenant_id);
+-- Parcial: a reconciliacao so varre os jobs pendentes, que sao uma fracao dos
+-- succeeded. Um indice full deixaria o caminho quente do worker paginando
+-- linhas que ele nunca consulta.
+CREATE INDEX IF NOT EXISTS idx_publish_jobs_reconcile ON publish_jobs (updated_at) WHERE release_id_missing;
 CREATE INDEX IF NOT EXISTS idx_dead_letter_jobs_open ON dead_letter_jobs (tenant_id, resolution, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_whatsapp_templates_lookup ON whatsapp_templates (tenant_id, name, language_code);
 
@@ -217,6 +234,15 @@ CREATE POLICY tenant_isolation_posts ON posts
 CREATE POLICY tenant_isolation_publish_jobs ON publish_jobs
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+-- Somente Leitura, e somente para o reconciliador, que varre jobs de todos os
+-- tenants sem pertencer a nenhum. A policy acima continua valendo para escrita:
+-- `withSystem` nao autoriza gravar em nome de um tenant, entao toda alteracao
+-- de job continua passando por `withTenant(job.tenantId)`. Separar as duas coisas
+-- e o ponto -- leitura de sistema e bem mais barata de conceder do que escrita.
+CREATE POLICY system_read_publish_jobs ON publish_jobs
+  FOR SELECT
+  USING (COALESCE(NULLIF(current_setting('app.is_system', true), '')::boolean, false));
 
 CREATE POLICY tenant_isolation_dead_letter_jobs ON dead_letter_jobs
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)

@@ -41,3 +41,13 @@ export interface PostizIntegrationSummary {
   provider: string;
   identifier: string | null;
 }
+
+/**
+ * Conteudo recuperado de um post cujo id o provedor ainda nao tinha devolvido.
+ * `id` e o id do post NA REDE, e `url` o permalink -- e o que a reconciliacao
+ * grava no job. A lista vem vazia enquanto o provedor nao processou.
+ */
+export interface PostizMissingContent {
+  id: string;
+  url: string;
+}

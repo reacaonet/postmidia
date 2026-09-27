@@ -101,8 +101,15 @@ export interface PublishJob {
   status: PublishJobStatus;
   scheduledAt: string;
   attempts: number;
+  /**
+   * Enquanto `releaseIdMissing` for true, isto e o id INTERNO do Postiz, e nao
+   * o id da rede. A reconciliacao usa esse id para pedir o id verdadeiro ao
+   * Postiz; so depois de reconciliado o campo passa a ser o id da rede.
+   */
   externalPostId: string | null;
   permalink: string | null;
+  /** Publicacao aceita, mas o provedor ainda nao devolveu o id do post. */
+  releaseIdMissing: boolean;
   lastError: string | null;
   createdAt: string;
   updatedAt: string;

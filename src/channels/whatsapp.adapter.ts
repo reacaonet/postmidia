@@ -102,6 +102,7 @@ export const createWhatsappAdapter = (): ChannelAdapter => ({
         externalPostId: messageId,
         permalink: null,
         releaseIdMissing: false,
+    reconcilable: false,
         raw: response.data,
       };
     } catch (error) {

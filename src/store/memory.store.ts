@@ -173,7 +173,13 @@ export const createMemoryStore = (): Store => {
 
     async insertJob(input) {
       const timestamp = now();
-      const created: PublishJob = { ...input, id: newId(), createdAt: timestamp, updatedAt: timestamp };
+      const created: PublishJob = {
+        ...input,
+        releaseIdMissing: false,
+        id: newId(),
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
       jobs.set(created.id, created);
       return created;
     },
@@ -214,6 +220,13 @@ export const createMemoryStore = (): Store => {
         }
         return true;
       });
+    },
+
+    async listJobsPendingReconciliation(limit) {
+      return [...jobs.values()]
+        .filter((job) => job.releaseIdMissing)
+        .sort((a, b) => (a.updatedAt < b.updatedAt ? -1 : 1))
+        .slice(0, limit);
     },
 
     async upsertDeadLetter(input) {

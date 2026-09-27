@@ -32,6 +32,17 @@ const envSchema = z.object({
   PUBLISH_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(50).default(5),
   PUBLISH_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(5),
   PUBLISH_BACKOFF_BASE_MS: z.coerce.number().int().min(100).default(30_000),
+  // Reconciliacao de releaseIdMissing. Desligada por padrao: quem liga e o
+  // worker, e o operador pode nao querer varredura automatica num deploy.
+  RECONCILE_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+  RECONCILE_INTERVAL_MS: z.coerce.number().int().min(30_000).default(300_000),
+  // Teto por passada. `getMissingContent` pode dormir 10s dentro da chamada
+  // quando a integracao tem refreshWait, entao um lote grande seguraria o
+  // worker por minutos.
+  RECONCILE_BATCH: z.coerce.number().int().min(1).max(50).default(5),
   EMBEDDED_WORKER: z
     .enum(['true', 'false'])
     .default('true')

@@ -134,6 +134,7 @@ export const createTelegramAdapter = (): ChannelAdapter => ({
       externalPostId: String(message.message_id),
       permalink: telegramPermalink(message.chat.id, message.message_id),
       releaseIdMissing: false,
+    reconcilable: false,
       raw: message,
     };
   },
