@@ -562,6 +562,134 @@ JOBS=$(printf '%s' "$METRICS" | j '.data.byStatus.succeeded || 0')
 # forte de separacao e o `verify-metrics.ts`, que semeia dois tenants e prova
 # que a visao por tenant nao enxerga o vizinho.
 
+# --- Secao 12: templates de WhatsApp (Fase 6) ---
+#
+# Nenhuma das rotas de template era testada pela API: nem a listagem, nem a
+# criacao, nem o PATCH de status. O grafo de transicoes mora em
+# verify-template-status.ts (10 checks, funcao pura + Postgres); aqui vai a
+# camada HTTP em volta dele, que e onde a maquina pode ser contornada.
+echo ""
+echo "=== 12. fase 6: templates de WhatsApp ==="
+
+TPL=$(curl -s -m 20 -X POST "$BASE/whatsapp/templates" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d '{"name":"promo_e2e","languageCode":"pt_BR","category":"MARKETING","status":"REJECTED"}')
+TPLID=$(printf '%s' "$TPL" | j '.data.id')
+[ -n "$TPLID" ] && ok "template criado com status REJECTED" || bad "template nao criado: $(printf '%s' "$TPL" | head -c 200)"
+
+# A listagem precisa trazer o status que foi gravado. Um 200 com lista vazia
+# passaria num `length > 0` mal escrito, e o operador veria uma tela em branco.
+LIST=$(curl -s -m 20 "$BASE/whatsapp/templates" -H "$AUTH")
+check "listagem traz o template criado" "$(printf '%s' "$LIST" | j ".data.filter(x=>x.id==='$TPLID').length")" "1"
+check "a listagem preserva o status" "$(printf '%s' "$LIST" | j ".data.filter(x=>x.id==='$TPLID')[0].status")" "REJECTED"
+
+# --- O caso perigoso, pela API ---
+#
+# REJECTED -> APPROVED e o gesto que o operador faz quando a publicacao esta
+# quebrada e ele tem pressa. A Meta reprovou; marcar como aprovado na mao produz
+# um template que a API aceita e a Meta recusa no envio, depois de gravar job,
+# gastar cota e queimar as tentativas. Precisa ser 409, e a resposta precisa dizer
+# que a aprovacao e do provedor.
+REJ=$(curl -s -m 20 -X PATCH "$BASE/whatsapp/templates/$TPLID/status" -H 'Content-Type: application/json' -H "$AUTH" -d '{"status":"APPROVED"}')
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X PATCH "$BASE/whatsapp/templates/$TPLID/status" -H 'Content-Type: application/json' -H "$AUTH" -d '{"status":"APPROVED"}')
+check "REJECTED -> APPROVED barrado (409)" "$CODE" "409"
+printf '%s' "$REJ" | grep -q 'provedor' && ok "a recusa diz que a aprovacao e do provedor" || bad "recusa sem mencao ao provedor: $(printf '%s' "$REJ" | head -c 200)"
+
+# E o status nao mudou: um 409 que grava antes de recusar seria pior que nao ter
+# a protecao nenhuma.
+check "o status nao mudou depois do 409" "$(curl -s -m 20 "$BASE/whatsapp/templates" -H "$AUTH" | j ".data.filter(x=>x.id==='$TPLID')[0].status")" "REJECTED"
+
+# O caminho legitimo: reprovado volta para PENDING, e de PENDING para APPROVED.
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X PATCH "$BASE/whatsapp/templates/$TPLID/status" -H 'Content-Type: application/json' -H "$AUTH" -d '{"status":"PENDING"}')
+check "REJECTED -> PENDING aceito (200)" "$CODE" "200"
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X PATCH "$BASE/whatsapp/templates/$TPLID/status" -H 'Content-Type: application/json' -H "$AUTH" -d '{"status":"APPROVED"}')
+check "PENDING -> APPROVED aceito (200)" "$CODE" "200"
+check "o status mudou mesmo" "$(curl -s -m 20 "$BASE/whatsapp/templates" -H "$AUTH" | j ".data.filter(x=>x.id==='$TPLID')[0].status")" "APPROVED"
+
+# Reaplicar o mesmo status e no-op, nao conflito: o sync vai reescrever o status
+# que ja esta, e um 409 ali seria um falso positivo que derrubaria a Fase 6.
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X PATCH "$BASE/whatsapp/templates/$TPLID/status" -H 'Content-Type: application/json' -H "$AUTH" -d '{"status":"APPROVED"}')
+check "reaplicar o mesmo status e 200, nao 409" "$CODE" "200"
+
+# Transicao que nao existe no vocabulario da Meta.
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X PATCH "$BASE/whatsapp/templates/$TPLID/status" -H 'Content-Type: application/json' -H "$AUTH" -d '{"status":"REJECTED"}')
+check "APPROVED -> REJECTED barrado (409)" "$CODE" "409"
+
+# Id inexistente: 404, e nao 409 de "transicao invalida" -- a confusao entre "esse
+# template nao existe" e "esse template nao pode mudar de estado" mandaria o
+# operador procurar um template que ele tem.
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X PATCH "$BASE/whatsapp/templates/00000000-0000-0000-0000-000000000000/status" -H 'Content-Type: application/json' -H "$AUTH" -d '{"status":"PENDING"}')
+check "PATCH de template inexistente (404)" "$CODE" "404"
+
+# Status fora do enum nem chega na maquina: e o schema que barra, com 400.
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X PATCH "$BASE/whatsapp/templates/$TPLID/status" -H 'Content-Type: application/json' -H "$AUTH" -d '{"status":"APROVADO"}')
+check "status fora do enum (400)" "$CODE" "400"
+
+# Criar de novo o mesmo template e conflito com nome uteis, nao 400 de constraint.
+# Sem a checagem previa na rota, o UNIQUE estourava e o handler generico
+# devolvia "violation of unique constraint", que nao diz qual template nem o que
+# fazer.
+DUP=$(curl -s -m 20 -X POST "$BASE/whatsapp/templates" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d '{"name":"promo_e2e","languageCode":"pt_BR","category":"MARKETING"}')
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X POST "$BASE/whatsapp/templates" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d '{"name":"promo_e2e","languageCode":"pt_BR","category":"MARKETING"}')
+check "template duplicado (409)" "$CODE" "409"
+printf '%s' "$DUP" | grep -q 'ja existe' && ok "o 409 diz que o template ja existe" || bad "409 sem mensagem util: $(printf '%s' "$DUP" | head -c 200)"
+printf '%s' "$DUP" | grep -q 'violation of unique' && bad "o 409 vazou a constraint do Postgres" || ok "o 409 nao vaza a constraint do banco"
+
+# O idioma entra na identidade do template: promo em en_US e outro template.
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X POST "$BASE/whatsapp/templates" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d '{"name":"promo_e2e","languageCode":"en_US","category":"MARKETING"}')
+check "mesmo nome em outro idioma (201)" "$CODE" "201"
+
+# --- O bloqueio de publicacao, que e o criterio de aceite da fase ---
+#
+# Um template em PENDING tem de recusar a criacao do post E dizer onde resolver.
+# A mensagem antiga ("a Meta so aceita publicacao com status APPROVED") deixava
+# o operador sem proximo passo; a nova aponta a sincronizacao e diz que o status
+# muda por leitura do provedor, nao por PATCH.
+TG=$(curl -s -m 20 -X POST "$BASE/accounts" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d '{"network":"whatsapp","externalAccountId":"wa-tpl-e2e","displayName":"WA TPL","secret":"tok"}' | j '.data.id')
+CODE=$(curl -s -m 20 -X PATCH "$BASE/whatsapp/templates/$TPLID/status" -H 'Content-Type: application/json' -H "$AUTH" -d '{"status":"PENDING"}')
+TGPOST=$(curl -s -m 20 -X POST "$BASE/campaigns/$CAMP/posts" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d "$(node -e "console.log(JSON.stringify({contentType:'template',text:'x',media:[],settings:{templateName:'promo_e2e',languageCode:'pt_BR',bodyParams:[]},accountIds:['$TG'],audience:['5511900000009']}))")")
+check "post com template PENDING (422)" "$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X POST "$BASE/campaigns/$CAMP/posts" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d "$(node -e "console.log(JSON.stringify({contentType:'template',text:'x',media:[],settings:{templateName:'promo_e2e',languageCode:'pt_BR',bodyParams:[]},accountIds:['$TG'],audience:['5511900000009']}))")")" "422"
+printf '%s' "$TGPOST" | grep -q 'sync' && ok "o 422 do template aponta a sincronizacao" || bad "o 422 nao aponta a sincronizacao: $(printf '%s' "$TGPOST" | head -c 240)"
+# ...e o mesmo 422 tem de explicar que o status nao se digita. Um operador que
+# le "PENDING" e um PATCH na rota vai tentar exatamente o que a fase proibe.
+printf '%s' "$TGPOST" | grep -q 'PATCH' && ok "o 422 avisa que PATCH nao resolve" || bad "o 422 nao avisa sobre o PATCH: $(printf '%s' "$TGPOST" | head -c 240)"
+
+# --- A auditoria da mudanca de status ---
+#
+# A listagem vem ORDER BY created_at DESC e o limite default e 50, entao a
+# contagem e conferida sobre um limite alto para nao depender de quantas
+# entradas as secoes anteriores criaram.
+AUDT=$(curl -s -m 20 "$BASE/audit?limit=500" -H "$AUTH")
+AUDSTAT=$(printf '%s' "$AUDT" | j ".data.filter(x=>x.action==='whatsapp_template.status_changed').length")
+AUDNEW=$(printf '%s' "$AUDT" | j ".data.filter(x=>x.action==='whatsapp_template.created').length")
+[ "$AUDSTAT" -gt 0 ] && ok "a mudanca de status foi auditada ($AUDSTAT entradas)" || bad "nenhuma entrada whatsapp_template.status_changed"
+[ "$AUDNEW" -gt 0 ] && ok "a criacao do template foi auditada ($AUDNEW entradas)" || bad "nenhuma entrada whatsapp_template.created"
+# E a auditoria carrega a transicao, e nao so o status final: sem o `from`, o
+# log nao diz o que o operador mudou, que e a unica coisa que se investiga.
+check "a auditoria guarda o status de origem" "$(printf '%s' "$AUDT" | j ".data.filter(x=>x.action==='whatsapp_template.status_changed').map(x=>x.metadata.from).indexOf('REJECTED') >= 0")" "true"
+
+# --- O header x-tenant-id nao sobrepoe a assinatura ---
+#
+# Este check era "listagem nao aceita tenant forcado -> 403" e ele estava errado
+# de dois jeitos. Primeiro: o 403 nao acontece em dev, porque o .env local liga
+# ALLOW_TENANT_HEADER e o header e aceito de proposito ali. Segundo, e o mais
+# importante: eu mandava um Bearer VALIDO junto com o header, entao o 200 era o
+# resultado certo — o token assinado vence e o header e descartado (o middleware
+# so le o header depois de o token ter falhado).
+#
+# O invariante que vale nao e "o header e recusado", e "o header nao escolhe o
+# tenant quando existe um token assinado". Entao o teste manda os dois, com o
+# header apontando para um tenant que nao existe, e exige que a resposta seja a
+# do tenant assinado. Se o header prevalecesse, o RLS nao acharia nada e a
+# lista viria vazia.
+FORCED=$(curl -s -m 20 "$BASE/whatsapp/templates" -H "$AUTH" -H 'X-Tenant-Id: 00000000-0000-0000-0000-000000000000')
+check "o header nao sobrepoe o token assinado" "$(printf '%s' "$FORCED" | j ".data.filter(x=>x.id==='$TPLID').length")" "1"
+
 # A limpeza final e feita pelo trap de EXIT, que tambem cobre o caminho de erro.
 echo ""
 echo "RESULTADO: $PASS ok, $FAIL falhas"

@@ -1,6 +1,13 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { appendAudit, insertTemplate, listTemplates, updateTemplateStatus } from '../store';
+import {
+  appendAudit,
+  findTemplate,
+  insertTemplate,
+  listTemplates,
+  updateTemplateStatus,
+} from '../store';
+import { explainTemplateTransition } from '../channels/whatsapp/template-status';
 import { requireRole, requireTenant, type AuthenticatedRequest } from '../http/tenant';
 import { asyncHandler } from '../http/async-handler';
 
@@ -37,6 +44,19 @@ router.post(
     const request = req as AuthenticatedRequest;
     const input = createTemplateSchema.parse(req.body);
 
+    // Sem esta checagem, o `UNIQUE (tenant_id, name, language_code)` estourava e
+    // o handler generico devolvia 400 "violation of unique constraint" — que nao
+    // diz qual template, nem o que fazer. A identidade do template inclui o
+    // idioma: `promo` em pt_BR e `promo` em en_US sao templates distintos.
+    const existing = await findTemplate(request.tenantId, input.name, input.languageCode);
+    if (existing) {
+      res.status(409).json({
+        success: false,
+        error: `Template "${input.name}" (${input.languageCode}) ja existe neste tenant (status ${existing.status})`,
+      });
+      return;
+    }
+
     const created = await insertTemplate({ tenantId: request.tenantId, ...input });
 
     await appendAudit({
@@ -64,6 +84,20 @@ router.patch(
     const previous = (await listTemplates(request.tenantId)).find(
       (template) => template.id === req.params.id
     );
+    if (!previous) {
+      res.status(404).json({ success: false, error: 'Template nao encontrado' });
+      return;
+    }
+
+    // A transicao e conferida antes de gravar. Sem isto, o PATCH aceitava
+    // qualquer par do enum e o caminho REJECTED -> APPROVED na mao produzia um
+    // template que a API aceitava e a Meta recusaria no envio.
+    const refusal = explainTemplateTransition(previous.status, input.status);
+    if (refusal) {
+      res.status(409).json({ success: false, error: refusal });
+      return;
+    }
+
     const updated = await updateTemplateStatus(request.tenantId, req.params.id, input.status);
     if (!updated) {
       res.status(404).json({ success: false, error: 'Template nao encontrado' });

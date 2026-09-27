@@ -186,7 +186,9 @@ CREATE INDEX IF NOT EXISTS idx_publish_jobs_tenant ON publish_jobs (tenant_id);
 -- linhas que ele nunca consulta.
 CREATE INDEX IF NOT EXISTS idx_publish_jobs_reconcile ON publish_jobs (updated_at) WHERE release_id_missing;
 CREATE INDEX IF NOT EXISTS idx_dead_letter_jobs_open ON dead_letter_jobs (tenant_id, resolution, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_whatsapp_templates_lookup ON whatsapp_templates (tenant_id, name, language_code);
+-- `whatsapp_templates` nao ganha indice proprio: o `UNIQUE (tenant_id, name,
+-- language_code)` da definicao da tabela ja cria exatamente este indice, e um
+-- segundo custaria uma escrita a mais por template sem consultar nada diferente.
 
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY;

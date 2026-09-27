@@ -41,8 +41,19 @@ const buildTemplateRequest = async (
   if (!template) {
     issues.push(`template "${name}" (${languageCode}) nao existe para este tenant`);
   } else if (template.status !== 'APPROVED') {
+    // Este e o criterio de aceite da Fase 6: a mensagem tem que apontar a
+    // sincronizacao, nao apenas dizer que o status esta errado. Dizer "so
+    // APPROVED publica" deixa o operador sem proximo passo; a rejeicao da Meta
+    // tem que vir com o motivo, porque "REJECTED" sem motivo e um beco sem
+    // saida para quem esta olhando.
+    const detail =
+      template.status === 'REJECTED'
+        ? 'a Meta reprovou este template; o motivo so aparece na leitura de message_templates da WABA'
+        : 'a Meta ainda nao processou este template';
     issues.push(
-      `template "${name}" esta ${template.status}; a Meta so aceita publicacao com status APPROVED`
+      `template "${name}" (${languageCode}) esta ${template.status}: ${detail}. ` +
+        'Aprovacao e do provedor, nao do postmidia -- o status muda quando o provedor responder, ' +
+        'nao por PATCH. Sincronize com GET /whatsapp/templates/sync.'
     );
   }
 

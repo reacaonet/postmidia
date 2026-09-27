@@ -606,13 +606,50 @@ anterior em `validateAgainstNetworkSpec` só disparava **se** houvesse extensão
 **Aceite:** aceitação de payload comprovada contra a API real; publicação real
 ainda pendente de credenciais por rede.
 
-### Fase 6 — WhatsApp real ⬜
-- [ ] Sincronizar templates com a Graph API (hoje o status é manual)
-- [ ] Tratar a janela de 24h da Meta
+### Fase 6 — WhatsApp real 🟡
+
+- [x] Template reprovado não pode virar aprovado na mão (`409`, com motivo)
+- [x] Grafo de transições no vocabulário da Meta, com motivo por recusa
+- [x] Template `PENDING` bloqueia o post e a mensagem aponta a sincronização
+- [ ] Sincronizar templates com a Graph API (hoje o status ainda é manual)
+- [ ] Guardar `external_id` e o motivo da reprovação, para o operador saber *por quê*
+- [ ] Janela de 24h da Meta
 - [ ] Validar contra uma WABA de teste
 
-**Aceite:** template `PENDING` da Meta bloqueia a criação do post com mensagem
-que aponta a sincronização.
+**Aceite:** ✅ `scripts/verify-template-status.ts` (10 checks) e E2E seção 12.
+O post com template `PENDING` volta `422` e o corpo diz que a aprovação é do
+provedor, que o status muda quando o provedor responder e não por `PATCH`, e qual
+endpoint resolve.
+
+**Por que a parte executável parou aqui, e não na linha de cima.** A transição de
+status que importa — `REJECTED → APPROVED` — é a que o operator faz com a mão, e
+por isso ela não depende de credencial. A leitura autoritativa depende. Ela não
+está bloqueada por falta de paciência: está bloqueada por um desencontro de id.
+
+`whatsapp_templates` não guarda id nenhum da Meta, e `channel_accounts.external_account_id`
+guarda o **phone-number id** (o número que recebe mensagem). A publicação usa
+esse id e funciona. Mas `message_templates` é uma edge da **WABA**, e o WABA id é
+outro objeto. Extrair a edge de um WABA exige `whatsapp_business_management` e o
+`waba-id`, que ninguém anotou.
+
+Duas saídas, e a escolha é de produto, não minha:
+
+1. **Guardar o WABA id no cadastro da conta.** Coluna nova, nullable, então não
+   quebra conta existente. É a forma correta e a que a Meta espera.
+2. **Descobrir o WABA a partir do phone-number id** em tempo de sync. É uma
+   chamada extra e um mapeamento que eu não posso testar aqui.
+
+Enquanto isso não for decidido, escrever o cliente da Meta seria escrever código
+que parece autoritativo e não foi verificado contra uma WABA — o pior resultado
+possível para quem for confiar no status depois.
+
+**A rede de segurança, e o que ela não resolve.** A máquina de estado impede os
+transitórios absurdos; ela não traz a verdade da Meta. Um operador pode ainda
+marcar `PENDING → APPROVED` à mão, e o produto deixa, porque essa é a única forma
+de publicar enquanto o sync não existe. O `409` no `REJECTED → APPROVED` fecha a
+porta perigosa, que é a que não tem volta: reprovado por conteúdo errado é
+reprovado de novo no envio, e a falha apareceria como erro de publicação, com
+cota e tentativas já gastas.
 
 ### Como rodar a verificação
 
@@ -906,6 +943,9 @@ npm run verify:metrics       # 15 checks
 
 # Verificacao da Fase 8 (mídia; sem Docker, sobe um servidor HTTP local)
 npm run verify:media         # 19 checks
+
+# Verificacao da Fase 6 (status de template; funcao pura + Postgres)
+npm run verify:templates     # 10 checks
 npm run verify:metrics       # 15 checks, exige DATABASE_URL
 ```
 
@@ -946,7 +986,7 @@ o teste quiser. Todos os imports que leem o `env` são dinâmicos, feitos depois
 ajuste, porque import estático é hoisted e congelaria o `config` com o Postiz de
 verdade.
 
-O E2E (`scripts/run-e2e.ps1`, 72 checks) cobre a camada HTTP: 401 sem token,
+O E2E (`scripts/run-e2e.ps1`, 96 checks) cobre a camada HTTP: 401 sem token,
 404 em id inexistente, 400 em `action` inválida, os 409 de corrida, o requeue
 zerando `attempts`, o discard sem tocar no job, e os três filtros. O estado de
 "esgotou as tentativas" é semeado por `scripts/seed-dead-letter.ts`, porque

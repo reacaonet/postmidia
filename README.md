@@ -115,6 +115,7 @@ npm run verify:dead-letter                             # 17 checks, exige DATABA
 npm run verify:reconcile                               # 14 checks, exige DATABASE_URL
 npm run verify:metrics                                 # 15 checks, exige DATABASE_URL
 npm run verify:media                                   # 19 checks, sem Docker
+npm run verify:templates                               # 10 checks, exige DATABASE_URL
 npm run verify:queue                                   # fila fora do HTTP
 npm run typecheck
 ```
