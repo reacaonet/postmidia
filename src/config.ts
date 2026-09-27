@@ -48,6 +48,19 @@ const envSchema = z.object({
   // tenant. Vazio em dev mantem a rota fechada com 503, nunca aberta.
   METRICS_TOKEN: z.string().default(''),
   METRICS_WINDOW_HOURS: z.coerce.number().int().min(1).max(720).default(24),
+  // Libera a sonda de midia para enderecos privados. Existe para os testes, que
+  // servem a midia de `127.0.0.1`. Fora disso e exatamente o buraco de SSRF que a
+  // sonda existe para fechar, entao o boot em producao recusa o processo.
+  MEDIA_PROBE_ALLOW_PRIVATE: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+  // Sonda de midia ligada por padrao. Desligar restaura o comportamento antigo
+  // (so valida o que o cliente declara), que e o que nao devemos querer.
+  MEDIA_PROBE_ENABLED: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((value) => value === 'true'),
   EMBEDDED_WORKER: z
     .enum(['true', 'false'])
     .default('true')
@@ -103,6 +116,13 @@ export function assertProductionSafety(): void {
   if (env.ALLOW_TENANT_HEADER) {
     blocking.push(
       'ALLOW_TENANT_HEADER nao pode ser true em producao: o header nao e assinado e permitiria forjar o tenant.'
+    );
+  }
+
+  if (env.MEDIA_PROBE_ALLOW_PRIVATE) {
+    blocking.push(
+      'MEDIA_PROBE_ALLOW_PRIVATE nao pode ser true em producao: a sonda de midia buscaria URLs internas ' +
+        '(metadados de nuvem, Redis, Postgres em rede privada) numa URL escolhida pelo cliente.'
     );
   }
 

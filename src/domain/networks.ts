@@ -32,6 +32,48 @@ export const POSTIZ_BRIDGED_NETWORKS: readonly Network[] = [
 export const isProviderSpecApplicable = (network: Network): boolean =>
   POSTIZ_BRIDGED_NETWORKS.includes(network);
 
+/**
+ * Extensoes que o `POST /upload-from-url` do Postiz aceita.
+ *
+ * Este e um limite do NOSSO pipeline, nao da rede: o Instagram aceita `.mov` e
+ * o TikTok aceita `.webm`, mas o upload-from-url do Postiz so aceita estas seis
+ * e rejeita o resto com 400. Sem esta intersecao, um post com `.mov` passava
+ * inteira pela validacao e quebrava na hora de publicar -- depois de gravar o
+ * job, consumir a cota e criar a fila morta na ultima tentativa.
+ *
+ * Some quando a Fase 8 entrar: com storage proprio a API deixa de depender do
+ * `upload-from-url` e do sniffing de extensao dele.
+ */
+export const POSTIZ_UPLOAD_EXTENSIONS: ReadonlySet<string> = new Set([
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'mp4',
+]);
+
+/**
+ * Formatos de video que a rede aceita E que o nosso pipeline consegue entregar.
+ *
+ * Intersecao, e nao a lista da rede: valem os dois lados. `NETWORK_SPECS`
+ * continua documentando o que a rede aceita, porque e a informacao que vira
+ * verdade assim que o storage existir -- mas a validacao tem de valer o
+ * pipeline real, senao a promise e feita no agendamento e quebrada na
+ * publicacao.
+ *
+ * O mesmo principio da Fase 7: se a fonte (aqui, o Postiz) encurtar o limite, a
+ * constante local antiga nao pode continuar autorizando o post.
+ */
+export const effectiveVideoFormats = (network: Network): readonly string[] => {
+  const spec = NETWORK_SPECS[network];
+  if (!POSTIZ_BRIDGED_NETWORKS.includes(network)) {
+    // Nativas vao direto ao provedor, sem passar pelo upload-from-url.
+    return spec.media.videoFormats;
+  }
+  return spec.media.videoFormats.filter((format) => POSTIZ_UPLOAD_EXTENSIONS.has(format));
+};
+
 export interface ContentTypeSpec {
   id: string;
   label: string;

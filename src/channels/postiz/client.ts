@@ -1,6 +1,8 @@
 import axios from 'axios';
 import { env } from '../../config';
+import { POSTIZ_UPLOAD_EXTENSIONS } from '../../domain/networks';
 import { isRetryableStatus, PublishError } from '../adapter';
+import { mediaExtension } from '../media-ext';
 import { quotaBucketOf, recordPostizCall } from './quota';
 import type {
   PostizCreatePayload,
@@ -70,26 +72,13 @@ export const postizCreatePost = (
  * vira um 400 opaco do Postiz so depois de gastar o round-trip -- e ainda entra
  * no cache de midia como se fosse um erro transitorio.
  */
-const UPLOAD_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'mp4']);
-
-const extensionOfPath = (url: string): string => {
-  let pathname: string;
-  try {
-    pathname = new URL(url).pathname;
-  } catch {
-    // Nao parseavel como URL absoluta: cai no split simples.
-    pathname = url.split('?')[0].split('#')[0];
-  }
-  const lastSegment = pathname.slice(pathname.lastIndexOf('/') + 1);
-  const lastDot = lastSegment.lastIndexOf('.');
-  return lastDot <= 0 ? '' : lastSegment.slice(lastDot + 1).toLowerCase();
-};
+const UPLOAD_EXTENSIONS = POSTIZ_UPLOAD_EXTENSIONS;
 
 export const postizUploadFromUrl = async (
   apiKey: string,
   url: string
 ): Promise<PostizMediaFile> => {
-  const extension = extensionOfPath(url);
+  const extension = mediaExtension(url);
   if (!UPLOAD_EXTENSIONS.has(extension)) {
     throw new PublishError(
       'postiz_media_extension_unsupported',

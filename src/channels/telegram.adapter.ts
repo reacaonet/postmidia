@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { providerHttp } from './provider-http';
 import type { ResolvedChannelAccount } from '../domain/types';
 import {
   assertPublishable,
@@ -38,7 +39,7 @@ const callTelegram = async <T>(
   let data: TelegramResponse<T> | undefined;
 
   try {
-    const response = await axios.post<TelegramResponse<T>>(
+    const response = await providerHttp.post<TelegramResponse<T>>(
       `${TELEGRAM_API}/bot${botToken}/${method}`,
       body
     );

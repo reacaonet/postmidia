@@ -15,6 +15,7 @@
     "verify:dead-letter": "ts-node --transpile-only scripts/verify-dead-letter.ts",
     "verify:reconcile": "ts-node --transpile-only scripts/verify-reconcile.ts",
     "verify:metrics": "ts-node --transpile-only scripts/verify-metrics.ts",
+    "verify:media": "ts-node --transpile-only scripts/verify-media.ts",
     "verify:queue": "ts-node --transpile-only scripts/verify-queue.ts"
   },
   "dependencies": {

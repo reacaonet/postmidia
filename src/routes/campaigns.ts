@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { hasAdapter, resolveAdapter } from '../channels/registry';
+import { enrichMedia } from '../channels/media-probe';
 import type { PublishSpec } from '../channels/adapter';
 import { decryptSecret } from '../security/secret-box';
 import {
@@ -105,9 +106,16 @@ router.post(
       return { account, resolved };
     });
 
+    // O tamanho da midia e derivado do servidor quando o cliente nao manda.
+    // Sem isto, `image_too_large`/`video_too_large` so disparavam para quem se
+    // deu ao trabalho de declarar `bytes`, e o limite de 8 MB do Instagram nao
+    // valia para ninguem. A sonda nunca lanca e nunca bloqueia o post: e
+    // melhor-esforco, e a autoridade definitiva chega com o storage da Fase 8.
+    const media = await enrichMedia(input.media);
+
     const spec: PublishSpec = {
       text: input.text,
-      media: input.media,
+      media,
       contentType: input.contentType,
       settings: input.settings,
       recipient: null,
@@ -170,7 +178,7 @@ router.post(
       campaignId: campaign.id,
       contentType: input.contentType,
       text: input.text,
-      media: input.media,
+      media,
       settings: input.settings,
     });
 

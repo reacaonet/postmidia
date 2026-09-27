@@ -693,21 +693,95 @@ O E2E nao consegue cobrir a precedencia do limite do provedor, porque isso
 depende de um `maxLength` que so o Postiz real popula e nao ha endpoint para
 simular por API; essa parte fica no teste unitario, com fixtures.
 
-### Fase 8 — Mídia e storage ⬜
+### Fase 8 — Mídia e storage ◐
 Hoje as URLs são passadas ao Postiz, que baixa do lado dele. O upload-from-url
 é limitado a 30/h e é o caminho mais frágil do desenho.
 
 - [ ] Storage próprio (S3/R2) com URLs assinadas de TTL compatível com o
       limite de 24h do WhatsApp
-- [ ] Validação de tamanho, dimensões e duração no upload
-- [ ] Remover `bytes` opcional do `MediaRef` — hoje a validação só roda se o
-      cliente mandar
+- [~] Validação de tamanho, dimensões e duração no upload — **tamanho resolvido;
+      dimensões e duração ainda dependem do cliente**
+- [x] Remover `bytes` opcional do `MediaRef` — a validação deixou de depender do cliente
 
-### Fase 9 — Observabilidade e operação ◐
+#### A validação de tamanho não valia nada (implementado)
+
+`image_too_large` e `video_too_large` existiam no código, mas só disparavam
+quando o cliente mandava `bytes` no `MediaRef`. Nada no servidor derivava o
+valor. Uma imagem de 80 MB num post para o Instagram (limite 8 MB) passava pela
+validação inteira: criava job, ocupava um dos slots de upload, queimava cinco
+tentativas no backoff e morria na fila morta. O limite estava escrito e não
+valia para quem não se desse ao trabalho de declará-lo.
+
+Agora o servidor sonda a URL: `HEAD` primeiro, e `GET` com `Range: bytes=0-0`
+quando o host recusa (405 é comum em CDN) — o tamanho vem do `Content-Range`, e
+o arquivo nunca é baixado. Cliente que manda `bytes` continua mandando; a sonda
+preenche só o que falta e devolve uma **cópia**, porque o objeto do corpo da
+requisição é compartilhado com o `Post.media` guardado no store.
+
+**Fazer o servidor buscar uma URL escolhida pelo cliente é uma superfície de
+SSRF, e não um detalhe.** Um link para `169.254.169.254`, para o Postgres em rede
+privada ou para o Redis seria uma porta aberta por um "melhoria" na validação.
+Por isso a sonda:
+
+- só aceita `http`/`https`;
+- resolve o nome e recusa qualquer endereço privado, loopback, link-local,
+  CGNAT, multicast, reservado, ULA IPv6 e IPv4 mapeado em IPv6;
+- recusa um nome que resolve para um endereço público **e** um privado;
+- **não segue redirect** — um 302 para o link-local contornaria a guarda, porque
+  o destino só é conhecido depois da decisão;
+- nunca lança e nunca bloqueia o post. Host que recusa HEAD ou DNS que falha não
+  pode impedir o agendamento de um post legítimo.
+
+`MEDIA_PROBE_ALLOW_PRIVATE=true` existe para os testes, que servem mídia em
+`127.0.0.1`, e `assertProductionSafety` **recusa o boot** com ele ligado em
+produção — o mesmo tratamento de `ALLOW_TENANT_HEADER`.
+
+Risco residual, registrado: o axios re-resolve o nome na hora do request, então
+um nome com DNS rebinding passa entre a checagem e o fetch. O que a sonda expõe
+é tamanho e tipo, nunca o conteúdo, e o fim real — não buscar URL arbitrária —
+chega com o storage próprio.
+
+#### Formato aceito pela rede × formato que o pipeline entrega
+
+`NETWORK_SPECS` dizia que o Instagram aceita `.mov` e o TikTok aceita `.webm`. O
+`upload-from-url` do Postiz aceita seis extensões e **não** inclui nenhuma
+dessas. O `.mov` passava pela validação de rede inteira e quebrava na hora de
+publicar, depois de gravar o job e gastar a cota — com um erro que falava de
+extensão e não de rede.
+
+`effectiveVideoFormats` devolve a **interseção**: vale o que a rede aceita e o que
+o nosso pipeline entrega. Redes nativas (Telegram, WhatsApp) não passam pelo
+upload-from-url e ficam com a lista inteira. A mensagem distingue os dois casos
+("a rede aceita, o pipeline não") do caso comum ("a rede não aceita"), porque o
+cliente precisa saber se o que ele tem que resolver é trocar o arquivo ou esperar
+a Fase 8. `NETWORK_SPECS` continua documentando a capacidade real da rede: é a
+informação que vira verdade quando o storage existir.
+
+Mesmo princípio da Fase 7 — se a fonte encurta o limite, a constante local
+antiga não pode continuar autorizando o post.
+
+#### Outros correções nesta rodada
+
+| Correção | Onde | Consequência evitada |
+|---|---|---|
+| Extensão da URL em dois lugares, discordando | `channels/media-ext.ts` | `https://cdn/x.y/imagem` virava `y/imagem` → `video_format_unsupported` falso |
+| Sem `timeout` no axios do WhatsApp e do Telegram | `channels/provider-http.ts` | Graph API travado segurava o worker do BullMQ em `running` para sempre, sem backoff e sem DLQ |
+| Cache de upload sem TTL, sem limite e sem conta na chave | `postiz/media-cache.ts` | Um `Map` que crescia para sempre; e duas contas do mesmo tenant reusando o id de asset gerado pela chave da outra — o id do Postiz só resolve na organização que o gerou |
+| WhatsApp aceitava imagem + vídeo e descartava o vídeo em silêncio | `whatsapp.adapter.ts` | A Cloud API envia uma mídia por mensagem; o segundo item sumia sem erro |
+| `GRAPH_VERSION` fixo no código | `whatsapp.adapter.ts` | Sem como trocar a versão da Graph API por ambiente |
+
+**O que continua aberto e por quê.** Dimensões e duração continuam valendo só o
+que o cliente declara: `HEAD` dá `Content-Length` e nada mais, e saber pixel de
+imagem ou duração de vídeo exige baixar o arquivo e inspecioná-lo — o que
+significa `sharp`/`ffprobe` como dependência nova, ou o storage próprio, onde os
+bytes passam pela nossa mão de qualquer forma. O storage S3/R2 segue bloqueado
+por bucket e credenciais.
+
+### Fase 9 — Observabilidade e operação ✅
 - [x] DLQ para jobs que estouraram as tentativas
 - [x] Reconciliação de `releaseIdMissing`
-- [ ] Métricas: jobs por tenant, taxa de falha por rede, latência de publicação
-- [ ] Alerta de quota do Postiz (90/h é pouco)
+- [x] Métricas: jobs por tenant, taxa de falha por rede, latência de publicação
+- [x] Alerta de quota do Postiz (90/h é pouco)
 
 #### DLQ (implementada)
 
@@ -826,6 +900,12 @@ em nome dela — o mesmo nível do resolve da DLQ, não uma leitura comum de job
 ```bash
 npm run verify:dead-letter   # 17 checks, exige DATABASE_URL
 npm run verify:reconcile     # 14 checks, exige DATABASE_URL
+
+# Verificacao da Fase 9 (painel operacional; exige DATABASE_URL)
+npm run verify:metrics       # 15 checks
+
+# Verificacao da Fase 8 (mídia; sem Docker, sobe um servidor HTTP local)
+npm run verify:media         # 19 checks
 npm run verify:metrics       # 15 checks, exige DATABASE_URL
 ```
 
@@ -955,7 +1035,7 @@ docker run -d --name postmidia-redis -p 6379:6379 redis:7-alpine
 | Publicação real nunca executada (sem credenciais) | Payload aceito ≠ post publicado | Fase 5 validou DTO, auth e upload; falta uma integração real por rede |
 | Stack do Postiz consome ~5 GiB com stores dedicados | Colide com o resto do Docker; Hyper-V socket dá timeout | **Resolvido:** 1 Postgres e 1 Redis compartilhados com o app; heap do ES fixado em 256 MB |
 | API key do Postiz guardada em texto puro | Dump do banco expira todas as chaves | Reportado ao upstream; não corrigido |
-| `upload-from-url` exige extensão no path | URL assinada de CDN é rejeitada | Guarda local `postiz_media_extension_unsupported` |
+| `upload-from-url` exige extensão no path | URL assinada de CDN é rejeitada | Guarda local `postiz_media_extension_unsupported`, e `effectiveVideoFormats` barra o formato cedo |
 | Fila em memória | Restart perde agendamento | ✅ Resolvido na Fase 4 (BullMQ/Redis) |
 | `docker-compose.yml` desatualizado | Subia stack quebrada e colidia em 6379 | ✅ Reescrito na Fase 5 com 1 Postgres + 1 Redis compartilhados; `docker compose` é a entrada única |
 | Rate limit em memória | Reinício zera a janela; múltiplas instâncias não se protegem | ✅ Resolvido na Fase 4 (Redis, com fallback em memória) |

@@ -39,9 +39,19 @@ export const createPostizAdapter = (network: Network): ChannelAdapter => ({
       throw new PublishError('unsupported_by_postiz', `Postiz nao atende ${network}`, false);
     }
 
+    // `Promise.all` aqui e o que transforma N midias em N uploads. Deduplicar
+    // por URL (no media-cache) resolve URLs repetidas, mas nao midias distintas
+    // no mesmo post -- e a cota e 30/h, nao 30 por post. O limite por rede ja
+    // barra o pior caso (1 video, 1..35 imagens); o que sobra e o custo real.
     const images = await Promise.all(
       spec.media.map((item) =>
-        resolveMediaAsset(account.tenantId, account.secret, item.url, postizUploadFromUrl)
+        resolveMediaAsset(
+          account.tenantId,
+          account.id,
+          account.secret,
+          item.url,
+          postizUploadFromUrl
+        )
       )
     );
 

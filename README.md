@@ -114,6 +114,7 @@ npm run verify:provider-specs                          # 10 checks, sem Docker
 npm run verify:dead-letter                             # 17 checks, exige DATABASE_URL
 npm run verify:reconcile                               # 14 checks, exige DATABASE_URL
 npm run verify:metrics                                 # 15 checks, exige DATABASE_URL
+npm run verify:media                                   # 19 checks, sem Docker
 npm run verify:queue                                   # fila fora do HTTP
 npm run typecheck
 ```
@@ -221,6 +222,8 @@ e o boot **recusa** o processo em produção por causa disso.
   produção. Ela vai no `.env` e nunca no git.
 - `METRICS_TOKEN` é o segredo do painel operacional: comparação em tempo
   constante, obrigatório em produção, e a rota falha fechada sem ele.
+- A sonda de mídia rejeita endereços privados, loopback e link-local, e
+  `MEDIA_PROBE_ALLOW_PRIVATE=true` é recusado no boot em produção.
 
 ## Estrutura
 

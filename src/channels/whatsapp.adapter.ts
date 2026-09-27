@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { providerHttp } from './provider-http';
 import type { ResolvedChannelAccount } from '../domain/types';
 import {
   assertPublishable,
@@ -38,6 +39,20 @@ export const createWhatsappAdapter = (): ChannelAdapter => ({
         field: 'account',
         code: 'whatsapp_recipient_required',
         message: 'WhatsApp exige destinatario; informe audience na criacao do post',
+      });
+    }
+
+    // A Cloud API envia UMA mensagem com no maximo uma midia, e o request usa
+    // `spec.media[0]`. A spec da rede diz `maxImages: 1, maxVideos: 1`, o que
+    // permitia um post com uma imagem E um video -- e o video sumiria em
+    // silencio, sem erro e sem aviso. O limite real e uma midia no total.
+    if (spec.media.length > 1) {
+      issues.push({
+        field: 'media',
+        code: 'whatsapp_single_media_only',
+        message:
+          `WhatsApp envia uma midia por mensagem; o post tem ${spec.media.length} ` +
+          `e apenas a primeira seria publicada. Divida em posts separados.`,
       });
     }
 
@@ -81,13 +96,13 @@ export const createWhatsappAdapter = (): ChannelAdapter => ({
 
     const url = `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(account.externalAccountId)}/messages`;
 
-    try {
-      const response = await axios.post<WhatsappSendResponse>(url, request, {
-        headers: {
-          Authorization: `Bearer ${account.secret}`,
-          'Content-Type': 'application/json',
-        },
-      });
+  try {
+    const response = await providerHttp.post<WhatsappSendResponse>(url, request, {
+      headers: {
+        Authorization: `Bearer ${account.secret}`,
+        'Content-Type': 'application/json',
+      },
+    });
 
       const messageId = response.data.messages?.[0]?.id;
       if (!messageId) {

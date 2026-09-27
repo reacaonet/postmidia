@@ -1,5 +1,6 @@
 import type { MediaRef, PostMetrics, ResolvedChannelAccount } from '../domain/types';
-import { NETWORK_SPECS, type Network } from '../domain/networks';
+import { NETWORK_SPECS, effectiveVideoFormats, type Network } from '../domain/networks';
+import { mediaExtension } from './media-ext';
 
 export interface PublishSpec {
   text: string;
@@ -65,12 +66,6 @@ export class PublishError extends Error {
 
 export const isRetryableStatus = (status: number): boolean =>
   status === 408 || status === 425 || status === 429 || status >= 500;
-
-const extensionOf = (url: string): string => {
-  const withoutQuery = url.split('?')[0];
-  const lastDot = withoutQuery.lastIndexOf('.');
-  return lastDot === -1 ? '' : withoutQuery.slice(lastDot + 1).toLowerCase();
-};
 
 export const validateAgainstNetworkSpec = (
   network: Network,
@@ -200,13 +195,23 @@ export const validateAgainstNetworkSpec = (
         message: `Video de ${video.durationSeconds}s excede ${contentType.maxVideoSeconds}s do formato ${contentType.label}`,
       });
     }
-    const extension = extensionOf(video.url);
-    if (extension && !networkSpec.media.videoFormats.includes(extension)) {
-      issues.push({
-        field: 'media',
-        code: 'video_format_unsupported',
-        message: `Formato .${extension} nao aceito em ${networkSpec.label} (aceitos: ${networkSpec.media.videoFormats.join(', ')})`,
-      });
+    const extension = mediaExtension(video.url);
+    if (extension) {
+      const accepted = effectiveVideoFormats(network);
+      if (!accepted.includes(extension)) {
+        // A mensagem distingue "a rede nao aceita" de "nosso pipeline nao
+        // entrega". O cliente precisa saber qual das duas coisas resolver: trocar
+        // o arquivo, ou esperar a Fase 8.
+        const networkAccepts = networkSpec.media.videoFormats.includes(extension);
+        issues.push({
+          field: 'media',
+          code: 'video_format_unsupported',
+          message: networkAccepts
+            ? `Formato .${extension} e aceito por ${networkSpec.label}, mas nao atravessa o upload-from-url do Postiz ` +
+              `(aceitos aqui: ${accepted.join(', ')}). Converte para .mp4 ou aguarde o storage proprio da Fase 8.`
+            : `Formato .${extension} nao aceito em ${networkSpec.label} (aceitos: ${accepted.join(', ')})`,
+        });
+      }
     }
   }
 
