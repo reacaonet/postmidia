@@ -8,6 +8,13 @@ coverage/
 .env.local
 .env.*.local
 
+# Credenciais das redes sociais do Postiz. O arquivo real e montado em
+# /app/.env dentro do container; o `.example` e versionado e fica sem valor.
+# Sem esta regra o `git add .` subiria os tokens de LinkedIn, Meta, TikTok e
+# Telegram no primeiro uso.
+postiz-social.env
+docker-compose.override.yml
+
 *.log
 *.tsbuildinfo
 .DS_Store

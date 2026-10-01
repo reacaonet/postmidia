@@ -808,6 +808,7 @@ antiga não pode continuar autorizando o post.
 | Cache de upload sem TTL, sem limite e sem conta na chave | `postiz/media-cache.ts` | Um `Map` que crescia para sempre; e duas contas do mesmo tenant reusando o id de asset gerado pela chave da outra — o id do Postiz só resolve na organização que o gerou |
 | WhatsApp aceitava imagem + vídeo e descartava o vídeo em silêncio | `whatsapp.adapter.ts` | A Cloud API envia uma mídia por mensagem; o segundo item sumia sem erro |
 | `GRAPH_VERSION` fixo no código | `whatsapp.adapter.ts` | ✅ `WHATSAPP_GRAPH_VERSION` no env, com o formato `vN.N` conferido no boot. Fixar trunca a comunicação quando a Meta aposenta uma versão, e o erro que volta muda de forma e passa a apontar para o produto |
+| Credenciais de rede social do Postiz sem lugar no projeto | `docker-compose.yml` | ✅ `postiz-social.env` montado em `/app/.env`. O OAuth falhava com `client_id is invalid "undefined"` porque o Postiz lê o próprio dotenv e ignora o `environment:` do compose |
 
 A URL da Cloud API saiu da interpolação inline para `buildWhatsappMessagesUrl()`,
 e isso não foi só para testabilidade. `externalAccountId` vem do cadastro da

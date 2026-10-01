@@ -92,10 +92,24 @@ services:
       UPLOAD_DIRECTORY: /uploads
       NEXT_PUBLIC_UPLOAD_DIRECTORY: /uploads
       API_LIMIT: "30"
+      # As credenciais das redes sociais NAO vao aqui.
+      #
+      # O backend e o orquestrador do Postiz sobem com `dotenv -e ../../.env`,
+      # ou seja, leem /app/.env DENTRO do container — nao o `environment:` do
+      # compose. Listar aqui as 26 variaveis de rede social seria ignorado na
+      # totalidade, e daria a impressao de que o OAuth estava configurado.
+      #
+      # Ver postiz-social.env.example e o ponto 1 do README.
     ports:
       - "4007:5000"
     volumes:
       - postiz-uploads:/uploads
+      # Monta o arquivo de credenciais do Postiz em /app/.env, que e o que o
+      # `dotenv -e ../../.env` dos processos le. O `:ro` impede o container de
+      # reescrever o arquivo — sem ele, um valor que o Postiz escrevesse
+      # voltaria para o seu arquivo local e apagaria a distinção entre o que
+      # voce digitou e o que ele injectou.
+      - ./postiz-social.env:/app/.env:ro
     healthcheck:
       # A imagem do Postiz nao tem wget, curl nem nc, entao o healthcheck usa o
       # node que ja roda o Nest. A API publica responde 401 sem API key: e o

@@ -37,6 +37,43 @@ separados.
 > normalmente por dentro, mas de fora dá `ECONNREFUSED` sem mensagem útil.
 > Antes de trocar, veja `netsh interface ipv4 show excludedportrange protocol=tcp`.
 
+## Conectar as redes sociais no Postiz
+
+Os tokens das redes são **do Postiz**, não do postmidia. O postmidia publica
+através do Postiz e não fala com LinkedIn, Meta, TikTok nem Telegram
+diretamente — exceto WhatsApp e Telegram, que são nativos (ver `NETWORK_SPECS`).
+
+Estas chaves **não** vão no `.env` do postmidia, nem no `environment:` do
+`docker-compose.yml`. O backend e o orquestrador do Postiz sobem com
+`dotenv -e ../../.env`, ou seja, leem `/app/.env` de dentro do container. O
+compose monta esse arquivo a partir de um arquivo local seu:
+
+```bash
+cp postiz-social.env.example postiz-social.env
+# preencha com suas chaves reais
+docker compose up -d postiz
+```
+
+O redirect URI em **todos** os provedores é:
+
+```
+http://localhost:4007/integrations/<provider>/callback
+```
+
+Dois erros que aparecem nesse ponto, e que não são bug do projeto:
+
+**`The passed in client_id is invalid "undefined"`** (LinkedIn, e qualquer OAuth)
+significa que a variável não chegou ao processo. As linhas de `environment:` do
+compose são lidas pelo Docker, não pelo Postiz — que usa o próprio dotenv.
+
+**No Telegram, o `/connect <código>` que ele manda no grupo não conclui nada.**
+O handshake exige que **você responda `/connect` para o mesmo bot, dentro do
+grupo**. Sem `TELEGRAM_BOT_TOKEN` preenchido, nenhum bot lê a sua resposta e o
+código expira sem mensagem de erro.
+
+`postiz-social.env` está no `.gitignore`; o `.example` é versionado e fica sem
+valor de propósito.
+
 ## Configurar a aplicação
 
 ```bash
