@@ -164,6 +164,11 @@ export const createMemoryStore = (): Store => {
       );
     },
 
+    async findUsersByEmail(email) {
+      const normalized = email.toLowerCase();
+      return [...users.values()].filter((user) => user.email === normalized);
+    },
+
     async findUserById(tenantId, id) {
       const user = users.get(id);
       return user && user.tenantId === tenantId ? user : undefined;

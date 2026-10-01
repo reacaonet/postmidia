@@ -371,6 +371,14 @@ export const createPostgresStore = (): Store => ({
       return first(result, mapUser);
     }),
 
+  // Ver `findUsersByEmail` em store/types.ts: a lista completa de candidatos e o
+  // que permite login sem slug sem decidir nada aqui.
+  findUsersByEmail: (email) =>
+    withSystem(async (client) => {
+      const result = await client.query('SELECT * FROM users WHERE email = $1', [email.toLowerCase()]);
+      return result.rows.map(mapUser);
+    }),
+
   findUserById: (tenantId, id) =>
     withTenant(tenantId, async (client) => {
       const result = await client.query(

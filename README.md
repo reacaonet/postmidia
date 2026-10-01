@@ -220,7 +220,7 @@ endpoint sob `/auth` autenticado exige `Authorization: Bearer <token>`.
 | `GET` | `/networks` | redes registradas, as bridged e os `NETWORK_SPECS` |
 | `GET` | `/capabilities` | o que o build atual faz e não faz |
 | `POST` | `/auth/signup` | cria tenant e usuário; exige `ALLOW_SELF_SIGNUP=true` |
-| `POST` | `/auth/login` | devolve token; login é por `slug` + email |
+| `POST` | `/auth/login` | devolve token; login é por email + senha |
 | `GET` | `/auth/me` | usuário do token |
 | `GET` | `/audit` | log de auditoria do tenant |
 | `GET` `POST` | `/accounts` | listar e criar contas de rede |
@@ -291,9 +291,16 @@ banco, não pela aplicação: RLS com `FORCE ROW LEVEL SECURITY` em 7 das 8
 tabelas. O papel da aplicação é não-superuser e sem `BYPASSRLS`, então não dá
 para contornar issuing SQL.
 
-O slug identifica o tenant no login. `ALLOW_TENANT_HEADER=true` deixa aceitar o
-tenant por header, sem assinatura — é o gancho para desenvolvimento de frontend
-e o boot **recusa** o processo em produção por causa disso.
+O login é por e-mail e senha, sem slug. Como `UNIQUE (tenant_id, email)` permite
+o mesmo e-mail em empresas diferentes, a senha é conferida contra **todos** os
+tenants que tenham esse e-mail e o acesso concede só o que casou. Se a mesma senha
+existir em duas empresas, a resposta é 409 pedindo o slug — escolher "a primeira"
+abriria uma porta para a empresa errada. `users` por isso ganhou uma policy de
+leitura de sistema, só `SELECT`, para resolver o e-mail antes do token existir.
+
+`ALLOW_TENANT_HEADER=true` deixa aceitar o tenant por header, sem assinatura — é
+o gancho para desenvolvimento de frontend e o boot **recusa** o processo em
+produção por causa disso.
 
 ## Segurança
 

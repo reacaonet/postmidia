@@ -9,12 +9,15 @@ import {
   appendAudit,
   createTenant,
   findUserByEmail,
-  getTenantBySlug,
   findUserById,
+  findUsersByEmail,
+  getTenant,
+  getTenantBySlug,
   insertUser,
   listAudit,
   toPublicUser,
 } from '../store';
+import type { User } from '../domain/types';
 
 const router = Router();
 
@@ -42,7 +45,11 @@ const signupSchema = z.object({
 });
 
 const loginSchema = z.object({
-  slug: slugSchema,
+  /**
+   * Opcional, e aceito so por compatibilidade: o painel pede so e-mail e senha.
+   * Quando vem, ele estreita a busca e evita o varrimento cross-tenant.
+   */
+  slug: slugSchema.optional(),
   email: emailSchema,
   password: z.string().min(1).max(200),
 });
@@ -104,31 +111,56 @@ router.post(
   asyncHandler(async (req, res) => {
     const input = loginSchema.parse(req.body);
 
-    // O login nao tem contexto de tenant ainda, por isso usa o slug.
-    // Isso mantem a leitura de users dentro do RLS, sem um SELECT cross-tenant.
-    const tenant = await getTenantBySlug(input.slug);
-    const user = tenant ? await findUserByEmail(tenant.id, input.email) : undefined;
+    /*
+     * Sem slug, o e-mail pode existir em varias empresas: `UNIQUE (tenant_id,
+     * email)` permite. A senha e conferida contra TODOS os candidatos e o
+     * acesso concede exatamente um tenant — o que casou. Sem o slug, escolher
+     * "o primeiro" seria abrir uma porta para a empresa errada.
+     */
+    const candidates = input.slug
+      ? await (async () => {
+          const tenant = await getTenantBySlug(input.slug!);
+          if (!tenant) return [];
+          const user = await findUserByEmail(tenant.id, input.email);
+          return user ? [user] : [];
+        })()
+      : (await findUsersByEmail(input.email)).filter((user) => user.status === 'active');
 
-    if (!user || user.status !== 'active') {
+    const matches: User[] = [];
+    for (const user of candidates) {
+      if (await verifyPassword(input.password, user.passwordHash)) {
+        matches.push(user);
+      }
+    }
+
+    if (matches.length === 0) {
       // Custo constante: nao revela se o e-mail existe pelo tempo de resposta.
       await burnPasswordCheck(input.password);
       res.status(401).json({ success: false, error: 'Credenciais invalidas' });
       return;
     }
 
-    if (!(await verifyPassword(input.password, user.passwordHash))) {
-      res.status(401).json({ success: false, error: 'Credenciais invalidas' });
+    if (matches.length > 1) {
+      // Mesma senha em duas empresas com o mesmo e-mail: nao ha como saber qual
+      // a pessoa quis. O slug desambigua; o erro diz isso em vez de chutar.
+      res.status(409).json({
+        success: false,
+        error: 'Este e-mail existe em mais de uma empresa; informe o slug da empresa no login',
+      });
       return;
     }
 
+    const user = matches[0];
+    const tenant = await getTenant(user.tenantId);
+
     await appendAudit({
-      tenantId: tenant!.id,
+      tenantId: user.tenantId,
       actorUserId: user.id,
       actorEmail: user.email,
       action: 'auth.login',
       entityType: 'user',
       entityId: user.id,
-      metadata: {},
+      metadata: input.slug ? { slug: input.slug } : {},
     });
 
     res.json({
@@ -136,11 +168,15 @@ router.post(
       data: {
         token: signToken({
           sub: user.id,
-          tenantId: tenant!.id,
+          tenantId: user.tenantId,
           email: user.email,
           role: user.role,
         }),
         user: toPublicUser(user),
+        // Sem o slug no pedido, o painel nao tem como saber o nome da empresa
+        // por conta propria; devolver aqui evita um segundo round-trip so para
+        // desenhar a barra superior.
+        tenant: tenant ? { id: tenant.id, name: tenant.name, slug: tenant.slug } : null,
       },
     });
   })

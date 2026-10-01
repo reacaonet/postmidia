@@ -5,14 +5,19 @@ import { describeError } from '../api/client';
 type Mode = 'login' | 'signup';
 
 /**
- * As duas formas ficam na mesma tela porque o cadastro precisa do slug, que
- * e a identidade do tenant no login. Explicar isso antes de a pessoa escolher
- * "signup" e descobrir depois no login evita o ida-e-volta.
+ * Login por e-mail e senha; o slug so aparece no cadastro.
+ *
+ * O painel esconde o slug porque a API resolve a empresa pelo e-mail. O campo
+ * continua existindo no login para o caso raro de a mesma senha existir em dois
+ * tenants com o mesmo e-mail — nesse caso a API responde 409, e so ai o campo
+ * e revelado, porque antes disso ele so confusiria quem nunca ouviu falar de
+ * slug.
  */
 export default function LoginPage(): JSX.Element {
   const { login, signup, expired, clearExpired } = useSession();
   const [mode, setMode] = useState<Mode>('login');
   const [slug, setSlug] = useState('');
+  const [askSlug, setAskSlug] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [tenantName, setTenantName] = useState('');
@@ -35,7 +40,9 @@ export default function LoginPage(): JSX.Element {
     setBusy(true);
     try {
       if (mode === 'login') {
-        await login({ slug, email, password });
+        // Sem slug enquanto o campo estiver escondido: manda-lo vazio deixaria
+        // a API procurar por `slug = ''` e recusar com 400 em vez de 401.
+        await login({ email, password, ...(askSlug && slug ? { slug } : {}) });
       } else {
         await signup({ tenantName, slug, email, password });
       }
@@ -47,6 +54,11 @@ export default function LoginPage(): JSX.Element {
       if (message.includes('Signup desabilitado')) {
         setSignupOff(true);
       }
+      // 409 aqui so acontece no login ambiguo: mesmo e-mail e mesma senha em
+      // empresas diferentes. Revelar o campo resolve.
+      if (mode === 'login' && message.includes('mais de uma empresa')) {
+        setAskSlug(true);
+      }
     } finally {
       setBusy(false);
     }
@@ -56,6 +68,7 @@ export default function LoginPage(): JSX.Element {
     setMode(next);
     setError(null);
     setSignupOff(false);
+    setAskSlug(false);
   };
 
   return (
@@ -64,7 +77,7 @@ export default function LoginPage(): JSX.Element {
         <div className="card">
           <h1 className="page-title">postmidia</h1>
           <p className="page-sub">
-            {mode === 'login' ? 'Entre com slug, e-mail e senha.' : 'Crie uma empresa e o usuário dono.'}
+            {mode === 'login' ? 'Entre com seu e-mail e senha.' : 'Crie uma empresa e o usuário dono.'}
           </p>
 
           {error && <div className="alert error">{error}</div>}
@@ -78,35 +91,55 @@ export default function LoginPage(): JSX.Element {
 
           <form onSubmit={submit}>
             {mode === 'signup' && (
-              <label>
-                <span>Nome da empresa</span>
-                <input
-                  value={tenantName}
-                  onChange={(e) => setTenantName(e.target.value)}
-                  required
-                  minLength={2}
-                  maxLength={120}
-                  placeholder="Minha Loja"
-                />
-              </label>
+              <>
+                <label>
+                  <span>Nome da empresa</span>
+                  <input
+                    value={tenantName}
+                    onChange={(e) => setTenantName(e.target.value)}
+                    required
+                    minLength={2}
+                    maxLength={120}
+                    placeholder="Minha Loja"
+                  />
+                </label>
+
+                <label>
+                  <span>Identificador da empresa (slug)</span>
+                  <input
+                    value={slug}
+                    onChange={(e) => setSlug(e.target.value.toLowerCase())}
+                    required
+                    minLength={3}
+                    maxLength={63}
+                    pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?"
+                    placeholder="minha-loja"
+                    autoComplete="organization"
+                  />
+                  <div className="hint">
+                    Identificador da empresa. Precisa ser único e é usado como endereço interno.
+                  </div>
+                </label>
+              </>
             )}
 
-            <label>
-              <span>Slug da empresa</span>
-              <input
-                value={slug}
-                onChange={(e) => setSlug(e.target.value.toLowerCase())}
-                required
-                minLength={3}
-                maxLength={63}
-                pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?"
-                placeholder="minha-loja"
-                autoComplete="organization"
-              />
-              <div className="hint">
-                Identificador da empresa. É o mesmo no cadastro e no login, e faz parte da URL interna.
-              </div>
-            </label>
+            {mode === 'login' && askSlug && (
+              <label>
+                <span>Identificador da empresa</span>
+                <input
+                  value={slug}
+                  onChange={(e) => setSlug(e.target.value.toLowerCase())}
+                  required
+                  minLength={3}
+                  maxLength={63}
+                  pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?"
+                  placeholder="minha-loja"
+                />
+                <div className="hint">
+                  A mesma senha foi encontrada em duas empresas com este e-mail. Informe qual.
+                </div>
+              </label>
+            )}
 
             <label>
               <span>E-mail</span>

@@ -341,7 +341,7 @@ login. Papéis `owner` / `admin` / `member`. Audit log append-only por tenant.
 | Item | Estado |
 |---|---|
 | `POST /auth/signup` (cria tenant + owner) | ✅ atrás de `ALLOW_SELF_SIGNUP` |
-| `POST /auth/login` por `slug` + e-mail + senha | ✅ |
+| `POST /auth/login` por e-mail + senha | ✅ slug opcional, só para desambiguar |
 | `GET /auth/me` | ✅ |
 | `GET /audit` | ✅ |
 | Remoção do `POST /tenants` público | ✅ agora 404 |
@@ -349,15 +349,34 @@ login. Papéis `owner` / `admin` / `member`. Audit log append-only por tenant.
 | Rate limit por IP em `/auth` (20/min) | ✅ Redis (sliding window, com fallback em memória) |
 | Header `x-tenant-id` | ✅ só com `ALLOW_TENANT_HEADER`, **recusado no boot em produção** |
 
-**Por que o login usa `slug`:** o login não tem contexto de tenant ainda. Se
-buscássemos o usuário por e-mail global, a leitura atravessaria tenants — e o
-RLS não ajudaria, porque o contexto ainda não existe. Pedir o slug resolve: o
-tenant vem do slug e o `SELECT` em `users` passa pelo RLS normalmente, sem
-`SECURITY DEFINER` nem privilégio elevado.
+**Por que o login não pede `slug`:** o painel é usado por gente que não sabe o
+identificador da própria empresa, e o slug no formulário é atrito puro. A
+dificuldade real é que `UNIQUE (tenant_id, email)` permite o mesmo e-mail em
+várias empresas, então "e-mail + senha" não identifica um tenant por si só.
+
+A solução confere a senha contra **todos** os candidatos daquele e-mail e
+concede exatamente o que casou. Três consequências:
+
+- **A ambiguidade precisa de resposta própria.** Com a mesma senha em duas
+  empresas, a API devolve 409 pedindo o slug. Escolher o primeiro candidato
+  seria abrir uma porta para a empresa errada — o usuário entraria numa loja que
+  não é a dele, com as contas de redes sociais dela.
+- **Mesmo e-mail com senhas diferentes entra direto**, porque a senha já
+  identifica o usuário sozinho. O 409 não pode ser o caminho normal.
+- **`users` ganhou policy de leitura de sistema, só `SELECT`.** Antes do token
+  não existe `app.tenant_id`, então a policy de tenant esconderia a linha e o
+  login sem slug simplesmente não acharia ninguém. A policy segue o mesmo padrão
+  de `publish_jobs` e `dead_letter_jobs`: leitura de sistema existe, escrita não.
+
+O `slug` continua aceito no login, e continua sendo obrigatório no cadastro — lá
+ele é a identidade da empresa, não um atrito.
 
 **Aceite verificado:** sem token → 401; `alg=none` → 401; issuer errado → 401;
 token de B em recurso de A → 404; `passwordHash` nunca sai em resposta; senha
-errada e e-mail inexistente dão a mesma mensagem e o mesmo custo.
+errada e e-mail inexistente dão a mesma mensagem e o mesmo custo; login sem slug
+cai no tenant certo; slug inválido não abre o tenant; mesma senha em duas
+empresas → 409, e o slug escolhe a certa; mesmo e-mail com senhas diferentes → 200
+na empresa da senha.
 
 #### Endurecimento de produção
 

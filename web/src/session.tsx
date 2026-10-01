@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
-import { login as apiLogin, me, signup as apiSignup } from './api';
+import { login as apiLogin, signup as apiSignup } from './api';
 import { ApiError } from './api/client';
 import type { Role, TenantRef } from './api/types';
 
@@ -28,7 +28,12 @@ export interface Session {
 }
 
 export interface SessionValue extends Session {
-  login: (input: { slug: string; email: string; password: string }) => Promise<void>;
+  /**
+   * `slug` e opcional. Sem ele a API resolve a empresa pelo e-mail; ele so
+   * desambigua quando a mesma senha existe em dois tenants com o mesmo e-mail,
+   * caso em que a API responde 409 pedindo o slug.
+   */
+  login: (input: { email: string; password: string; slug?: string }) => Promise<void>;
   signup: (input: {
     tenantName: string;
     slug: string;
@@ -104,20 +109,12 @@ export const SessionProvider = ({ children }: { children: ReactNode }): JSX.Elem
   }, [logout]);
 
   const login = useCallback(
-    async (input: { slug: string; email: string; password: string }) => {
+    async (input: { email: string; password: string; slug?: string }) => {
       const result = await apiLogin(input);
       const rawUser = result.data.user as { email: string; role: Role };
-      persist(result.data.token, { email: rawUser.email, role: rawUser.role }, null);
-      // O tenant so aparece no signup. No login ele vem do `me`, que le do
-      // token — entao buscamos depois para a barra superior mostrar o nome.
-      try {
-        const profile = await me(result.data.token);
-        const slugFromEmail = input.slug;
-        setTenant({ id: profile.data.tenantId, name: slugFromEmail, slug: slugFromEmail });
-      } catch {
-        // Falhar no `me` nao pode derrubar um login valido: o token ja esta
-        // guardado e as telas funcionam com o tenantId.
-      }
+      // O login ja devolve o tenant. Antes ele nao devolvia e o painel buscava
+      // `/auth/me` depois, so para descobrir o nome da empresa.
+      persist(result.data.token, { email: rawUser.email, role: rawUser.role }, result.data.tenant ?? null);
     },
     [persist]
   );

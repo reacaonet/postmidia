@@ -171,6 +171,53 @@ check "sem token" "$CODE" "401"
 CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer lixo" "$BASE/accounts")
 check "token invalido" "$CODE" "401"
 
+# O login normal e por e-mail e senha, sem slug. A secao 3b fixa o comportamento
+# no slug opcional e no 409 de ambiguidade, para o atalho nao virar brecha.
+NOSLUG=$(curl -s -m 20 -X POST "$BASE/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"e2e@$SLUG.com\",\"password\":\"senha12345\"}")
+NOEMAIL=$(printf '%s' "$NOSLUG" | j '.data.user.email')
+check "login sem slug, so e-mail e senha" "$NOEMAIL" "e2e@$SLUG.com"
+NOSLUGTENANT=$(printf '%s' "$NOSLUG" | j '.data.tenant.id')
+[ "$NOSLUGTENANT" = "$TENANT" ] && ok "login sem slug cai no tenant certo" || bad "tenant errado no login sem slug ($NOSLUGTENANT vs $TENANT)"
+CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$BASE/auth/login" \
+  -H 'Content-Type: application/json' -d "{\"email\":\"e2e@$SLUG.com\",\"password\":\"errada12345\"}")
+check "login sem slug com senha errada" "$CODE" "401"
+# Slug que existe mas com email de outro tenant: nao pode entrar na empresa errada.
+CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$BASE/auth/login" \
+  -H 'Content-Type: application/json' -d "{\"slug\":\"inexistente-$SLUG\",\"email\":\"e2e@$SLUG.com\",\"password\":\"senha12345\"}")
+check "slug invalido nao abre o tenant" "$CODE" "401"
+
+# Ambigidade so existe com a MESMA senha nos dois tenants: e o que o 409 tem que
+# pegar. Mesmo e-mail com senhas diferentes entra direto, porque nesse caso a
+# senha sozinha identifica o usuario. Os dois casos usam e-mails separados para
+# nao se misturarem.
+DUPMAIL="dup-samesenha@$SLUG.com"
+D1=$(curl -s -m 20 -X POST "$BASE/auth/signup" -H 'Content-Type: application/json' \
+  -d "{\"tenantName\":\"E2E dup a\",\"slug\":\"$SLUG-dupa\",\"email\":\"$DUPMAIL\",\"password\":\"senha12345\"}")
+[ -n "$(printf '%s' "$D1" | j '.data.token')" ] && ok "primeira empresa do e-mail duplicado criada" || bad "tenant dup a nao criado"
+D2=$(curl -s -m 20 -X POST "$BASE/auth/signup" -H 'Content-Type: application/json' \
+  -d "{\"tenantName\":\"E2E dup b\",\"slug\":\"$SLUG-dupb\",\"email\":\"$DUPMAIL\",\"password\":\"senha12345\"}")
+[ -n "$(printf '%s' "$D2" | j '.data.token')" ] && ok "segunda empresa com o mesmo e-mail criada" || bad "tenant dup b nao criado"
+CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$BASE/auth/login" \
+  -H 'Content-Type: application/json' -d "{\"email\":\"$DUPMAIL\",\"password\":\"senha12345\"}")
+check "mesma senha em duas empresas pede o slug" "$CODE" "409"
+DB=$(printf '%s' "$D2" | j '.data.user.tenantId')
+RESOLVED=$(curl -s -m 20 -X POST "$BASE/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"slug\":\"$SLUG-dupb\",\"email\":\"$DUPMAIL\",\"password\":\"senha12345\"}")
+check "o slug escolhe a empresa certa" "$(printf '%s' "$RESOLVED" | j '.data.user.tenantId')" "$DB"
+
+DIFFMAIL="dup-diffsenha@$SLUG.com"
+curl -s -m 20 -o /dev/null -X POST "$BASE/auth/signup" -H 'Content-Type: application/json' \
+  -d "{\"tenantName\":\"E2E diff a\",\"slug\":\"$SLUG-diffa\",\"email\":\"$DIFFMAIL\",\"password\":\"senha12345\"}"
+DIFFTENANT=$(curl -s -m 20 -X POST "$BASE/auth/signup" -H 'Content-Type: application/json' \
+  -d "{\"tenantName\":\"E2E diff b\",\"slug\":\"$SLUG-diffb\",\"email\":\"$DIFFMAIL\",\"password\":\"outrasenha99\"}" | j '.data.user.tenantId')
+CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$BASE/auth/login" \
+  -H 'Content-Type: application/json' -d "{\"email\":\"$DIFFMAIL\",\"password\":\"outrasenha99\"}")
+check "mesmo e-mail com senhas diferentes entra sem slug" "$CODE" "200"
+PICKED=$(curl -s -m 20 -X POST "$BASE/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$DIFFMAIL\",\"password\":\"outrasenha99\"}" | j '.data.user.tenantId')
+[ "$PICKED" = "$DIFFTENANT" ] && ok "a senha escolhe a empresa, sem slug" || bad "sem slug caiu na empresa errada"
+
 echo ""
 echo "=== 4. jobs ficam no Redis sem worker ==="
 WHEN=$(node -e "console.log(new Date(Date.now()+20000).toISOString())")

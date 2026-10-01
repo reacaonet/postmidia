@@ -12,6 +12,7 @@ import type {
   OpsMetrics,
   PublishJob,
   ReconcileResult,
+  TenantRef,
   WhatsappTemplate,
 } from './types';
 
@@ -49,11 +50,20 @@ export const signup = (body: {
 }): Promise<{ data: { token: string; user: unknown; tenant: unknown } }> =>
   api.post('/auth/signup', body);
 
+/**
+ * Sem `slug`: o login e por e-mail e senha. A API confere a senha contra todos os
+ * tenants que tenham esse e-mail e concede o unico que casar; se a mesma senha
+ * existir em duas empresas, responde 409 pedindo o slug.
+ *
+ * `tenant` volta no login porque o painel precisa do nome da empresa e, sem o
+ * slug no pedido, nao teria como saber.
+ */
 export const login = (body: {
-  slug: string;
   email: string;
   password: string;
-}): Promise<{ data: { token: string; user: unknown } }> => api.post('/auth/login', body);
+  slug?: string;
+}): Promise<{ data: { token: string; user: unknown; tenant: TenantRef | null } }> =>
+  api.post('/auth/login', body);
 
 export const me = (
   token: string

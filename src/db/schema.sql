@@ -221,6 +221,19 @@ CREATE POLICY tenant_isolation_users ON users
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 
+-- Leitura de SISTEMA em users, so para SELECT. O login sem slug precisa
+-- resolver o e-mail antes do token existir, e sem isto a policy de tenant
+-- esconderia a linha — `getTenantBySlug` ja lia em `tenants`, que nao tem RLS,
+-- mas `users` tem.
+--
+-- So SELECT: nenhuma policy de escrita de sistema. Um INSERT/UPDATE sem
+-- `app.tenant_id` continua barrado pela policy de tenant, entao isto nao
+-- abre caminho para escrever em nome de outro cliente.
+DROP POLICY IF EXISTS system_read_users ON users;
+CREATE POLICY system_read_users ON users
+  FOR SELECT
+  USING (COALESCE(NULLIF(current_setting('app.is_system', true), '')::boolean, false));
+
 -- audit_log e append-only de verdade: existem policies so para SELECT e INSERT.
 -- Nao existe policy para UPDATE/DELETE, e o Postgres nega o que nao tem policy.
 -- Comentar o log exigiria antes revogar estas policies explicitamente.

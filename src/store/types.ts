@@ -104,6 +104,20 @@ export interface Store {
     role: string;
   }): Promise<User>;
   findUserByEmail(tenantId: string, email: string): Promise<User | undefined>;
+  /**
+   * Leitura CRUZ de e-mail, sem tenant, para o login sem slug.
+   *
+   * `UNIQUE (tenant_id, email)` permite o mesmo e-mail em empresas diferentes,
+   * entao um e-mail pode resolver para mais de um usuario. A lista vem com todos
+   * os candidatos e quem chama decide: o login verifica a senha contra cada um e
+   * so entra no que casar.
+   *
+   * E leitura de SISTEMA de proposito, como `getTenantBySlug`: antes do token nao
+   * existe contexto de tenant para o RLS restricting. O risco e' a superficie —
+   * a funcao so aceita um e-mail exato e devolve o registro inteiro, entao quem
+   * chama precisa continuar sendo o login.
+   */
+  findUsersByEmail(email: string): Promise<User[]>;
   findUserById(tenantId: string, id: string): Promise<User | undefined>;
 
   appendAudit(input: Omit<AuditEntry, 'id' | 'createdAt'>): Promise<void>;

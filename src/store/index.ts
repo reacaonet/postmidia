@@ -18,6 +18,7 @@ export const {
   listTenants,
   insertUser,
   findUserByEmail,
+  findUsersByEmail,
   findUserById,
   appendAudit,
   listAudit,
