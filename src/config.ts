@@ -23,6 +23,14 @@ const envSchema = z.object({
     .regex(/^[0-9a-fA-F]{64}$/, 'TOKEN_ENCRYPTION_KEY deve ser 64 caracteres hex (32 bytes)'),
   // 4007 e a porta que o docker-compose publica; 5000 e a interna do nginx.
   POSTIZ_API_BASE_URL: z.string().url().default('http://localhost:4007/api/public/v1'),
+  // Versao da Graph API usada no envio de mensagem do WhatsApp. Precisa do
+  // prefixo `v`: a API rejeita `21.0` com 400 e o erro nao menciona o formato.
+  // Pinada por padrao; o formato e conferido aqui para que o erro de boot aponte
+  // a config, e nao a URL 400 que apareceria no primeiro envio em producao.
+  WHATSAPP_GRAPH_VERSION: z
+    .string()
+    .regex(/^v\d+\.\d+$/, 'WHATSAPP_GRAPH_VERSION precisa ser "vN.N", ex.: v21.0')
+    .default('v21.0'),
   POSTIZ_API_KEY: z.string().default(''),
   TELEGRAM_BOT_TOKEN: z.string().default(''),
   DATABASE_URL: z.string().default(''),
@@ -66,6 +74,13 @@ const envSchema = z.object({
     .default('true')
     .transform((value) => value === 'true'),
 });
+
+/**
+ * O schema exportado, para o `verify:provider-specs` conferir o formato da
+ * versao da Graph API sem duplicar a regra em dois lugares. So o schema: nao o
+ * resultado do parse, porque o boot ja saiu com codigo 1 se algo estiver errado.
+ */
+export const WHATSAPP_GRAPH_VERSION_SCHEMA = envSchema.shape.WHATSAPP_GRAPH_VERSION;
 
 const parsed = envSchema.safeParse(process.env);
 

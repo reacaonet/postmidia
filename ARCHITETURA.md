@@ -724,8 +724,10 @@ validacao.
   responde `native: true` com o `fallbackMaxLength` e o cache, e `sync-specs`
   responde 422 em vez de gastar chamada.
 
-**Aceite verificado** (`scripts/verify-provider-specs.ts`, 10 checks; e
+**Aceite verificado** (`scripts/verify-provider-specs.ts`, 13 checks; e
 `scripts/verify-e2e.sh`, secao 9, 10 checks; suite completa em 29 ok, 0 falhas).
+Os três checks novos cobrem a URL da Cloud API: a versão da Graph API vindo do
+env, o escape do id da conta e o formato `vN.N` conferido no boot.
 O E2E nao consegue cobrir a precedencia do limite do provedor, porque isso
 depende de um `maxLength` que so o Postiz real popula e nao ha endpoint para
 simular por API; essa parte fica no teste unitario, com fixtures.
@@ -805,7 +807,14 @@ antiga não pode continuar autorizando o post.
 | Sem `timeout` no axios do WhatsApp e do Telegram | `channels/provider-http.ts` | Graph API travado segurava o worker do BullMQ em `running` para sempre, sem backoff e sem DLQ |
 | Cache de upload sem TTL, sem limite e sem conta na chave | `postiz/media-cache.ts` | Um `Map` que crescia para sempre; e duas contas do mesmo tenant reusando o id de asset gerado pela chave da outra — o id do Postiz só resolve na organização que o gerou |
 | WhatsApp aceitava imagem + vídeo e descartava o vídeo em silêncio | `whatsapp.adapter.ts` | A Cloud API envia uma mídia por mensagem; o segundo item sumia sem erro |
-| `GRAPH_VERSION` fixo no código | `whatsapp.adapter.ts` | Sem como trocar a versão da Graph API por ambiente |
+| `GRAPH_VERSION` fixo no código | `whatsapp.adapter.ts` | ✅ `WHATSAPP_GRAPH_VERSION` no env, com o formato `vN.N` conferido no boot. Fixar trunca a comunicação quando a Meta aposenta uma versão, e o erro que volta muda de forma e passa a apontar para o produto |
+
+A URL da Cloud API saiu da interpolação inline para `buildWhatsappMessagesUrl()`,
+e isso não foi só para testabilidade. `externalAccountId` vem do cadastro da
+conta, então é dado de entrada: sem `encodeURIComponent`, um id contendo `/`
+reescreveria o caminho e trocaria o `messages` por outro endpoint da Graph API,
+sem erro nenhum. Agora há um check que passa `../../other_account` e exige que a
+URL continue terminando em `/messages`.
 
 **O que continua aberto e por quê.** Dimensões e duração continuam valendo só o
 que o cliente declara: `HEAD` dá `Content-Length` e nada mais, e saber pixel de

@@ -110,7 +110,7 @@ reiniciar a API reinicia o consumidor da fila.
 
 ```bash
 .\scripts\run-e2e.ps1                                  # 72 checks, sobe API e worker
-npm run verify:provider-specs                          # 10 checks, sem Docker
+npm run verify:provider-specs                          # 13 checks, sem Docker
 npm run verify:dead-letter                             # 17 checks, exige DATABASE_URL
 npm run verify:reconcile                               # 14 checks, exige DATABASE_URL
 npm run verify:metrics                                 # 15 checks, exige DATABASE_URL
@@ -225,6 +225,8 @@ e o boot **recusa** o processo em produção por causa disso.
   constante, obrigatório em produção, e a rota falha fechada sem ele.
 - A sonda de mídia rejeita endereços privados, loopback e link-local, e
   `MEDIA_PROBE_ALLOW_PRIVATE=true` é recusado no boot em produção.
+- `WHATSAPP_GRAPH_VERSION` precisa do prefixo `v` (`v21.0`). O formato é conferido
+  no boot, porque a Graph API rejeita `21.0` com um 400 que não menciona formato.
 
 ## Estrutura
 

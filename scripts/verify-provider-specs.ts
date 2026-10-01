@@ -11,6 +11,8 @@ import { NETWORK_SPECS } from '../src/domain/networks';
 import { validateAgainstNetworkSpec } from '../src/channels/adapter';
 import { toProviderSpec } from '../src/channels/postiz/spec-rules';
 import { isProviderSpecApplicable } from '../src/domain/networks';
+import { buildWhatsappMessagesUrl } from '../src/channels/whatsapp.adapter';
+import { env, WHATSAPP_GRAPH_VERSION_SCHEMA } from '../src/config';
 import type { ChannelAccount, PublishSpec, ResolvedChannelAccount } from '../src/domain/types';
 import type { PostizIntegrationSettings } from '../src/channels/postiz/types';
 
@@ -144,6 +146,49 @@ check('rede nativa sem provider spec continua validando pelo fallback', () => {
     ) !== undefined,
     true
   );
+});
+
+// ------------------------------------------------------ URL da Cloud API
+
+check('a versao da Graph API vem do env e nao do codigo', () => {
+  // A URL precisa refletir a versao recebida por parametro, e nao uma constante
+  // interna: sem isso, configurar o env nao mudaria nada e a falha apareceria
+  // so no primeiro envio em producao.
+  assert.equal(
+    buildWhatsappMessagesUrl('123', 'v19.0'),
+    'https://graph.facebook.com/v19.0/123/messages'
+  );
+  assert.equal(
+    buildWhatsappMessagesUrl('123', 'v21.0'),
+    'https://graph.facebook.com/v21.0/123/messages'
+  );
+});
+
+check('o id da conta e escapado, e nao concatenado cru', () => {
+  // `externalAccountId` vem do cadastro da conta, entao e dado de entrada. Um
+  // id com `/` reescreveria o caminho e trocaria `messages` por outro endpoint
+  // da Graph API -- trocar o destino do envio sem erro nenhum.
+  const url = buildWhatsappMessagesUrl('../../other_account', 'v21.0');
+  assert.ok(!url.includes('/../'), `a URL preservou travessia de caminho: ${url}`);
+  assert.ok(
+    url.endsWith('/messages'),
+    `a URL precisa terminar em /messages mesmo com id hostil: ${url}`
+  );
+  assert.ok(url.startsWith('https://graph.facebook.com/v21.0/'), url);
+});
+
+check('a versao da Graph API e validada no boot, com o formato da Meta', () => {
+  // A Graph API rejeita `21.0` (sem o `v`) com 400 e a mensagem nao menciona o
+  // formato. Conferir aqui move o erro para a configuracao.
+  assert.match(env.WHATSAPP_GRAPH_VERSION, /^v\d+\.\d+$/);
+  // O default tem de existir: quem nao configura nao pode quebrar.
+  const semConfig = WHATSAPP_GRAPH_VERSION_SCHEMA.safeParse(undefined);
+  assert.equal(semConfig.success, true, 'ausente deveria cair no default');
+  assert.match(semConfig.data!, /^v\d+\.\d+$/);
+  // E o formato errado e recusado.
+  assert.equal(WHATSAPP_GRAPH_VERSION_SCHEMA.safeParse('21.0').success, false);
+  assert.equal(WHATSAPP_GRAPH_VERSION_SCHEMA.safeParse('v21').success, false);
+  assert.equal(WHATSAPP_GRAPH_VERSION_SCHEMA.safeParse('latest').success, false);
 });
 
 console.log(`\n${passed} ok, 0 falhas`);

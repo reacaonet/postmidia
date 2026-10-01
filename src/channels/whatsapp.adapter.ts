@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { providerHttp } from './provider-http';
+import { env } from '../config';
 import type { ResolvedChannelAccount } from '../domain/types';
 import {
   assertPublishable,
@@ -13,14 +14,25 @@ import {
 } from './adapter';
 import { buildWhatsappRequest } from './whatsapp/request';
 
-const GRAPH_VERSION = 'v21.0';
-
 interface WhatsappSendResponse {
   messaging_product?: string;
   contacts?: { input: string; wa_id: string }[];
   messages?: { id: string; message_status?: string }[];
   error?: { code: number; title: string; message?: string };
 }
+
+/**
+ * URL de envio da Cloud API.
+ *
+ * `externalAccountId` e o phone-number id e vem do cadastro da conta, entao e
+ * dado de entrada: sem `encodeURIComponent` um id contendo `/` ou `..`
+ * reescreveria o caminho e trocaria o `messages` por outro endpoint da Graph API.
+ */
+export const buildWhatsappMessagesUrl = (
+  externalAccountId: string,
+  graphVersion: string = env.WHATSAPP_GRAPH_VERSION
+): string =>
+  `https://graph.facebook.com/${graphVersion}/${encodeURIComponent(externalAccountId)}/messages`;
 
 export const createWhatsappAdapter = (): ChannelAdapter => ({
   network: 'whatsapp',
@@ -94,7 +106,7 @@ export const createWhatsappAdapter = (): ChannelAdapter => ({
       throw new PublishError('whatsapp_request_invalid', issues.join('; '), false);
     }
 
-    const url = `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(account.externalAccountId)}/messages`;
+    const url = buildWhatsappMessagesUrl(account.externalAccountId);
 
   try {
     const response = await providerHttp.post<WhatsappSendResponse>(url, request, {
