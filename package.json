@@ -17,7 +17,10 @@
     "verify:metrics": "ts-node --transpile-only scripts/verify-metrics.ts",
     "verify:media": "ts-node --transpile-only scripts/verify-media.ts",
     "verify:templates": "ts-node --transpile-only scripts/verify-template-status.ts",
-    "verify:queue": "ts-node --transpile-only scripts/verify-queue.ts"
+    "verify:queue": "ts-node --transpile-only scripts/verify-queue.ts",
+    "dev:web": "npm --prefix web install --no-audit --no-fund && npm --prefix web run dev",
+    "build:web": "npm --prefix web install --no-audit --no-fund && npm --prefix web run build",
+    "typecheck:web": "npm --prefix web run typecheck"
   },
   "dependencies": {
     "@types/pg": "^8.23.1",

@@ -191,10 +191,27 @@ router.get(
       return;
     }
 
-    const { output } = await postizIntegrationSettings(
-      decryptSecret(account.encryptedSecret),
-      account.externalAccountId
-    );
+    // O erro do provedor NAO pode escapar cru. O handler global usa
+    // `error.status`, e um 401 do Postiz (token da conta invalido) viraria um
+    // 401 da nossa API — que o painel leria como "sessao expirada" e expulsaria
+    // o operador da tela, quando o problema e a conta dele, nao o login.
+    // 502 + `detail` mantem a falha visivel sem mentir sobre quem recusou.
+    let output: Record<string, unknown>;
+    try {
+      const result = await postizIntegrationSettings(
+        decryptSecret(account.encryptedSecret),
+        account.externalAccountId
+      );
+      output = result.output as unknown as Record<string, unknown>;
+    } catch (error) {
+      res.status(502).json({
+        success: false,
+        error: 'Provedor indisponivel para ler a configuracao da integracao',
+        detail: error instanceof Error ? error.message : String(error),
+        data: { network: account.network, native: false, cached },
+      });
+      return;
+    }
 
     res.json({
       success: true,

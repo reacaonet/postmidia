@@ -124,12 +124,22 @@ de `DATABASE_URL` (papel da aplicação) de propósito: o papel da aplicação �
 
 ## Rodar
 
-Em desenvolvimento, dois processos:
+São **três** processos: API, worker e painel. O painel é um app Vite separado
+em `web/`, porque a API não serve HTML nem estáticos.
+
+Em desenvolvimento, três terminais:
 
 ```bash
 npm run dev          # API em http://localhost:8601
 npm run dev:worker   # worker da fila, em processo separado
+npm run dev:web      # painel em http://localhost:5173
 ```
+
+O painel fala com a API por `/api/*` através do proxy do Vite, que remove o
+prefixo `/api` antes de encaminhar — a API serve as rotas na raiz. Não há CORS em
+desenvolvimento porque o navegador nunca faz chamada cross-origin.
+
+`npm run dev:web` instala as dependências de `web/` na primeira execução.
 
 Em produção, build antes:
 
@@ -137,16 +147,46 @@ Em produção, build antes:
 npm run build
 npm start            # dist/server.js
 npm run start:worker # dist/worker.js
+npm run build:web    # gera web/dist
 ```
 
 O worker é separado de propósito. Com `EMBEDDED_WORKER=true` ele sobe junto com
 a API, o que serve para desenvolvimento e mascara o principal risco do desenho:
 reiniciar a API reinicia o consumidor da fila.
 
+## Painel web
+
+`web/` é React + Vite + TypeScript, sem biblioteca de UI. Sete telas:
+
+| Rota            | O que faz                                                              |
+| --------------- | ---------------------------------------------------------------------- |
+| `/contas`       | cadastra contas, sincroniza specs do provedor, mostra limite efetivo   |
+| `/campanhas`    | cria campanhas, monta posts e acompanha jobs                          |
+| `/templates`    | templates de WhatsApp e as transições de status permitidas             |
+| `/fila-morta`   | re agenda ou descarta jobs que esgotaram as tentativas                 |
+| `/auditoria`    | quem fez o quê                                                         |
+| `/operacao`     | métricas de plataforma, com token separado                             |
+
+Três decisões que valem explicar antes de mexer:
+
+- **Sessão em `sessionStorage`, não `localStorage`.** `localStorage` sobrevive ao
+  fechar o navegador, então um XSS na origem deixaria o token do tenant
+  disponível para sempre. Não há refresh token na API: `JWT_TTL` é 12h.
+- **`/operacao` não aceita o JWT de tenant.** `owner` é papel por tenant, então
+  protegê-la com ele mostraria a fila inteira de todos os clientes para o dono de
+  qualquer loja. A rota usa `x-metrics-token` e falha fechada com 503 quando
+  `METRICS_TOKEN` não está configurado — o painel trata o 503 como "painel
+  desabilitado no servidor", não como erro de digitação.
+- **A lista de redes, tipos de conteúdo e limites vem de `GET /networks`.** O
+  painel não tem tabela própria de limites: um `contentType` é por rede
+  (`feed`, `reel`, `story`, `carousel`, `template`), e o compositor só oferece os
+  tipos que existem em *todas* as contas escolhidas, porque o `contentType` é
+  único por post e o backend valida por conta.
+
 ## Verificação
 
 ```bash
-.\scripts\run-e2e.ps1                                  # 72 checks, sobe API e worker
+.\scripts\run-e2e.ps1                                  # 96 checks, sobe API e worker
 npm run verify:provider-specs                          # 13 checks, sem Docker
 npm run verify:dead-letter                             # 17 checks, exige DATABASE_URL
 npm run verify:reconcile                               # 14 checks, exige DATABASE_URL
@@ -155,7 +195,13 @@ npm run verify:media                                   # 19 checks, sem Docker
 npm run verify:templates                               # 10 checks, exige DATABASE_URL
 npm run verify:queue                                   # fila fora do HTTP
 npm run typecheck
+npm run typecheck --prefix web                         # painel
 ```
+
+`verify:queue` exige nenhum worker ativo: ele prova que um job agendado fica no
+Redis e é retomado por um worker novo. Com `npm run dev` no ar o worker embarcado
+consome o job primeiro e a verificação falha — não é regressão, é contenção pelo
+mesmo job.
 
 O E2E usa **Git Bash**, não WSL: o WSL não alcança o loopback do Windows e a API
 sobe em `127.0.0.1:8601`. Use `scripts/run-e2e.ps1` em vez de chamar
