@@ -224,6 +224,8 @@ endpoint sob `/auth` autenticado exige `Authorization: Bearer <token>`.
 | `GET` | `/auth/me` | usuário do token |
 | `GET` | `/audit` | log de auditoria do tenant |
 | `GET` `POST` | `/accounts` | listar e criar contas de rede |
+| `PATCH` | `/accounts/:id` | corrigir nome, id na rede ou rotacionar o token |
+| `DELETE` | `/accounts/:id` | excluir a conta; 409 se houver publicação em fila |
 | `PATCH` | `/accounts/:id/status` | ativar, expirar, revogar |
 | `GET` | `/accounts/:id/settings` | specs do provedor; nas redes nativas, `native: true` |
 | `POST` | `/accounts/:id/sync-specs` | re-lê os limites no provedor |

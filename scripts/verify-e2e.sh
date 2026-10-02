@@ -355,6 +355,52 @@ NATIVE=$(curl -s -m 20 "$BASE/accounts/$WA/settings" -H "$AUTH")
 CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X POST "$BASE/accounts/$IG/sync-specs" -H "$AUTH")
 check "sync-specs com provedor fora do ar" "$CODE" "502"
 
+# Editar e excluir conta. O `@` do Telegram foi um bug real: o operador digita
+# `@bot` porque e assim que o username aparece, o banco guardava `@@bot`, e sem
+# rota de edicao o erro ficava sem correcao.
+TG=$(curl -s -m 20 -X POST "$BASE/accounts" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d '{"network":"telegram","externalAccountId":"@@Estetichat","displayName":"Itamidia","secret":"tok"}')
+TGID=$(printf '%s' "$TG" | j '.data.id')
+check "telegram normaliza @ duplicado" "$(printf '%s' "$TG" | j '.data.externalAccountId')" "@Estetichat"
+
+EDITED=$(curl -s -m 20 -X PATCH "$BASE/accounts/$TGID" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d '{"displayName":"Itamidia Telecom","externalAccountId":"Estetichat2"}')
+check "editar conta" "$(printf '%s' "$EDITED" | j '.data.displayName')" "Itamidia Telecom"
+check "editar normaliza o @ de novo" "$(printf '%s' "$EDITED" | j '.data.externalAccountId')" "@Estetichat2"
+# Trocar o token nao pode deixar a conta publicando com um token que ninguem validou.
+ROTATED=$(curl -s -m 20 -X PATCH "$BASE/accounts/$TGID" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d '{"secret":"outro-token"}')
+check "trocar token devolve a conta para pendente" "$(printf '%s' "$ROTATED" | j '.data.status')" "pending"
+check "o segredo novo nunca volta na resposta" "$(printf '%s' "$ROTATED" | j '.data.encryptedSecret')" ""
+check "editar sem campos" "$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X PATCH "$BASE/accounts/$TGID" -H 'Content-Type: application/json' -H "$AUTH" -d '{}')" "400"
+
+# Isolar o tenant antes de excluir: conta de outro tenant precisa ser 404, nao 200.
+# O tenant vizinho nasce pelo STORE, nao por `/auth/signup`: `/auth` tem rate limit
+# de 20/min por IP e um signup a mais aqui faz o proprio E2E estourar o limite e
+# derrubar a secao 5. O token dele e' forjado porque nao queremos consumir login.
+NEIGHBOR=$(npx ts-node --transpile-only scripts/make-neighbor-tenant.ts 2>/dev/null | tail -1)
+OTHER_TENANT=$(printf '%s' "$NEIGHBOR" | j '.tenantId')
+OAUTH=$(printf '%s' "$NEIGHBOR" | j '.token')
+[ -n "$OAUTH" ] || { echo "  FAIL nao deu para criar o tenant vizinho; os checks de isolamento nao valem nada"; exit 1; }
+ALIEN=$(curl -s -m 20 -X POST "$BASE/accounts" -H 'Content-Type: application/json' -H "Authorization: Bearer $OAUTH" \
+  -d '{"network":"telegram","externalAccountId":"@Alheia","displayName":"Alheia","secret":"tok"}' | j '.data.id')
+[ -n "$ALIEN" ] || { echo "  FAIL nao deu para criar a conta no tenant vizinho"; exit 1; }
+check "excluir conta de outro tenant" "$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X DELETE "$BASE/accounts/$ALIEN" -H "$AUTH")" "404"
+# A listagem do outro tenant ainda tem a conta: o DELETE alheio nao a levou junto.
+ALIVE=$(curl -s -m 20 "$BASE/accounts" -H "Authorization: Bearer $OAUTH")
+check "a conta alheia sobreviveu" "$(printf '%s' "$ALIVE" | grep -c "$ALIEN" | tr -d ' ')" "1"
+
+check "excluir conta" "$(curl -s -m 20 -X DELETE "$BASE/accounts/$TGID" -H "$AUTH" | j '.data.deleted')" "true"
+check "conta excluida some da lista" "$(curl -s -m 20 "$BASE/accounts" -H "$AUTH" | grep -c "$TGID" | tr -d ' ')" "0"
+
+# A conta tem job queued; apagar agora deixaria o worker sem destino.
+BUSY=$(curl -s -m 20 -X POST "$BASE/accounts" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d '{"network":"telegram","externalAccountId":"@Ocupada","displayName":"Ocupada","secret":"tok"}' | j '.data.id')
+BCAMP=$(curl -s -m 20 -X POST "$BASE/campaigns" -H 'Content-Type: application/json' -H "$AUTH" -d '{"name":"Delete"}' | j '.data.id')
+curl -s -m 20 -X POST "$BASE/campaigns/$BCAMP/posts" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d "$(node -e "console.log(JSON.stringify({contentType:'message',text:'oi',media:[],settings:{},accountIds:[process.argv[1]],scheduledAt:new Date(Date.now()+7200000).toISOString()}))" "$BUSY")" > /dev/null
+check "excluir conta com job pendente" "$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X DELETE "$BASE/accounts/$BUSY" -H "$AUTH")" "409"
+
 # Rede sem midia obrigatoria, para o limite de texto ser a unica causa plausivel
 # de recusa. Sem isso um 422 por media_required validaria o teste por engano.
 FB=$(curl -s -m 20 -X POST "$BASE/accounts" -H 'Content-Type: application/json' -H "$AUTH" \

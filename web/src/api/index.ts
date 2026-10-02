@@ -98,6 +98,15 @@ export const syncAccountSpecs = (
   id: string
 ): Promise<{ data: ChannelAccount }> => api.post(`/accounts/${id}/sync-specs`, undefined, token);
 
+export const updateAccount = (
+  token: string,
+  id: string,
+  body: { displayName?: string; externalAccountId?: string; secret?: string }
+): Promise<{ data: ChannelAccount }> => api.patch(`/accounts/${id}`, body, token);
+
+export const deleteAccount = (token: string, id: string): Promise<{ data: { id: string; deleted: true } }> =>
+  api.delete(`/accounts/${id}`, token);
+
 export const setAccountStatus = (
   token: string,
   id: string,

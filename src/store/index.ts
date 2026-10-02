@@ -25,6 +25,8 @@ export const {
   insertAccount,
   listAccounts,
   getAccount,
+  updateAccount,
+  deleteAccount,
   updateAccountStatus,
   updateAccountProviderSpec,
   insertCampaign,

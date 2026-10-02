@@ -1,10 +1,12 @@
 import { useState } from 'react';
 import {
   createAccount,
+  deleteAccount,
   getAccountSettings,
   getAccounts,
   getNetworks,
   syncAccountSpecs,
+  updateAccount,
 } from '../api';
 import type { ChannelAccount, NetworkSpec } from '../api/types';
 import { useAsync, useAction } from '../useAsync';
@@ -107,7 +109,14 @@ export default function AccountsPage(): JSX.Element {
         )}
       </div>
 
-      {selected && <AccountDetails account={selected} onClose={() => setSelected(null)} />}
+      {selected && (
+        <AccountDetails
+          account={selected}
+          canWrite={canWrite}
+          onClose={() => setSelected(null)}
+          onChanged={accounts.reload}
+        />
+      )}
     </>
   );
 }
@@ -262,7 +271,171 @@ const NewAccountForm = ({
   );
 };
 
-const AccountDetails = ({ account, onClose }: { account: ChannelAccount; onClose: () => void }): JSX.Element => {
+/**
+ * Editar e excluir a conta.
+ *
+ * Sem isso, um erro de digitacao no identificador era permanente: o operador
+ * digitava `@Estetichat`, o banco guardava `@@Estetichat`, e a unica saida era
+ * criar outra conta e esquecer a errada. A API normaliza o `@` do Telegram ao
+ * salvar, entao a edicao tambem corrige o que ja estava errado.
+ *
+ * Excluir pede confirmacao pelo nome da conta, porque o token Some junto e nao
+ * ha como recuperar. A API recusa (409) se houver publicacao em fila.
+ */
+const AccountEditor = ({
+  account,
+  onSaved,
+}: {
+  account: ChannelAccount;
+  onSaved: () => void;
+}): JSX.Element => {
+  const { token } = useSession();
+  const save = useAction();
+  const remove = useAction();
+
+  const [displayName, setDisplayName] = useState(account.displayName);
+  const [externalAccountId, setExternalAccountId] = useState(account.externalAccountId);
+  const [secret, setSecret] = useState('');
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
+
+  const submit = async (event: React.FormEvent): Promise<void> => {
+    event.preventDefault();
+    setDone(null);
+    const payload: { displayName?: string; externalAccountId?: string; secret?: string } = {};
+    if (displayName !== account.displayName) payload.displayName = displayName;
+    if (externalAccountId !== account.externalAccountId) payload.externalAccountId = externalAccountId;
+    if (secret.trim()) payload.secret = secret.trim();
+
+    if (Object.keys(payload).length === 0) {
+      setDone('Nada mudou.');
+      return;
+    }
+
+    const ok = await save.run(async () => {
+      await updateAccount(token ?? '', account.id, payload);
+    });
+    if (ok) {
+      setSecret('');
+      setDone(
+        payload.secret
+          ? 'Conta atualizada. O token trocou, então o status voltou para pendente até a rede confirmar.'
+          : 'Conta atualizada.'
+      );
+      onSaved();
+    }
+  };
+
+  const destroy = async (): Promise<void> => {
+    const ok = await remove.run(async () => {
+      await deleteAccount(token ?? '', account.id);
+    });
+    if (ok) {
+      onSaved();
+    }
+  };
+
+  return (
+    <div style={{ borderTop: '1px solid var(--line)', paddingTop: 16, marginBottom: 16 }}>
+      <form onSubmit={submit}>
+        <div className="row">
+          <label style={{ flex: 1 }}>
+            <span>Nome exibido</span>
+            <input
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              maxLength={120}
+              required
+            />
+          </label>
+          <label style={{ flex: 1 }}>
+            <span>Id na rede</span>
+            <input
+              value={externalAccountId}
+              onChange={(e) => setExternalAccountId(e.target.value)}
+              className="mono"
+              maxLength={200}
+              required
+            />
+            <div className="hint">
+              {account.network === 'telegram'
+                ? 'O @ é normalizado automaticamente. Escreva @seuBot ou seuBot, tanto faz.'
+                : 'Identificador exatamente como a rede mostra.'}
+            </div>
+          </label>
+        </div>
+
+        <label>
+          <span>Trocar token (deixe vazio para manter)</span>
+          <input
+            type="password"
+            value={secret}
+            onChange={(e) => setSecret(e.target.value)}
+            autoComplete="off"
+            placeholder="token atual mantido"
+          />
+          <div className="hint">
+            Trocar o token devolve a conta para <strong>pendente</strong>: ninguém pode publicar com um
+            token que ninguém validou.
+          </div>
+        </label>
+
+        <div className="actions">
+          <button disabled={save.busy}>{save.busy ? <span className="spinner" /> : 'Salvar'}</button>
+        </div>
+      </form>
+
+      {save.error && (
+        <div className="alert error" style={{ marginTop: 10 }}>
+          {save.error}
+        </div>
+      )}
+      {done && (
+        <div className="alert ok" style={{ marginTop: 10 }}>
+          {done}
+        </div>
+      )}
+
+      <div className="actions" style={{ marginTop: 16, borderTop: '1px solid var(--line)', paddingTop: 12 }}>
+        {!confirmDelete ? (
+          <button className="danger small" onClick={() => setConfirmDelete(true)}>
+            Excluir conta
+          </button>
+        ) : (
+          <>
+            <span style={{ fontSize: 13 }}>
+              Excluir <strong>{account.displayName}</strong> apaga o token e não tem como desfazer.
+            </span>
+            <button className="danger small" disabled={remove.busy} onClick={destroy}>
+              {remove.busy ? <span className="spinner" /> : 'Confirmar exclusão'}
+            </button>
+            <button className="secondary small" onClick={() => setConfirmDelete(false)}>
+              Cancelar
+            </button>
+          </>
+        )}
+      </div>
+
+      {remove.error && (
+        <div className="alert error" style={{ marginTop: 10 }}>
+          {remove.error}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const AccountDetails = ({
+  account,
+  canWrite,
+  onClose,
+  onChanged,
+}: {
+  account: ChannelAccount;
+  canWrite: boolean;
+  onClose: () => void;
+  onChanged: () => void;
+}): JSX.Element => {
   const { token } = useSession();
   const settings = useAsync(() => getAccountSettings(token ?? '', account.id), [token, account.id]);
 
@@ -276,6 +449,8 @@ const AccountDetails = ({ account, onClose }: { account: ChannelAccount; onClose
           Fechar
         </button>
       </div>
+
+      {canWrite && <AccountEditor account={account} onSaved={onChanged} />}
 
       <pre className="detail mono">{JSON.stringify(account, null, 2)}</pre>
 

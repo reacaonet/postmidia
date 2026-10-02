@@ -123,6 +123,8 @@ export const api = {
     request<T>(path, { method: 'POST', body, token }),
   patch: <T>(path: string, body?: unknown, token?: string | null): Promise<T> =>
     request<T>(path, { method: 'PATCH', body, token }),
+  delete: <T>(path: string, token?: string | null): Promise<T> =>
+    request<T>(path, { method: 'DELETE', token }),
 };
 
 /**

@@ -216,6 +216,35 @@ export const createMemoryStore = (): Store => {
       return account && account.tenantId === tenantId ? account : undefined;
     },
 
+    async updateAccount(tenantId, id, changes) {
+      const account = accounts.get(id);
+      if (!account || account.tenantId !== tenantId) {
+        return undefined;
+      }
+      const updated: ChannelAccount = {
+        ...account,
+        ...(changes.displayName === undefined ? {} : { displayName: changes.displayName }),
+        ...(changes.externalAccountId === undefined
+          ? {}
+          : { externalAccountId: changes.externalAccountId }),
+        ...(changes.encryptedSecret === undefined
+          ? {}
+          : { encryptedSecret: changes.encryptedSecret, status: 'pending', specsSyncedAt: null }),
+        ...(changes.encryptedSecret === undefined ? {} : { specsSyncedAt: null }),
+      };
+      accounts.set(id, updated);
+      return updated;
+    },
+
+    async deleteAccount(tenantId, id) {
+      const account = accounts.get(id);
+      if (!account || account.tenantId !== tenantId) {
+        return false;
+      }
+      accounts.delete(id);
+      return true;
+    },
+
     async updateAccountStatus(tenantId, id, status) {
       const account = accounts.get(id);
       if (!account || account.tenantId !== tenantId) {

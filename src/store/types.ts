@@ -126,6 +126,20 @@ export interface Store {
   insertAccount(input: AccountInput): Promise<ChannelAccount>;
   listAccounts(tenantId: string): Promise<ChannelAccount[]>;
   getAccount(tenantId: string, id: string): Promise<ChannelAccount | undefined>;
+  /**
+   * Edita os campos que o operador corrige sem refazer a conexao. `secret` e
+   * opcional de proposito: trocar o token da rede e uma operacao diferente de
+   * arrumar um `@` duplicado no identificador, e quem chama decide o que mandou.
+   * Trocar o segredo tambem devolve a conta para `pending`, porque a validity do
+   * token novo e desconhecida ate o provedor responder.
+   */
+  updateAccount(
+    tenantId: string,
+    id: string,
+    changes: { displayName?: string; externalAccountId?: string; encryptedSecret?: string }
+  ): Promise<ChannelAccount | undefined>;
+  /** Apaga a conta do tenant. Devolve `false` se o id nao existe neste tenant. */
+  deleteAccount(tenantId: string, id: string): Promise<boolean>;
   updateAccountStatus(
     tenantId: string,
     id: string,

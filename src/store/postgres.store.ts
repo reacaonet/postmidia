@@ -473,6 +473,33 @@ export const createPostgresStore = (): Store => ({
       return first(result, mapAccount);
     }),
 
+  updateAccount: (tenantId, id, changes) =>
+    withTenant(tenantId, async (client) => {
+      // COALESCE deixa cada campo opcional semmontar SQL dinamico: o que nao veio
+      // em `changes` continua como estava.
+      const result = await client.query(
+        `UPDATE channel_accounts
+            SET display_name = COALESCE($3, display_name),
+                external_account_id = COALESCE($4, external_account_id),
+                encrypted_secret = COALESCE($5, encrypted_secret),
+                status = CASE WHEN $5::text IS NULL THEN status ELSE 'pending' END,
+                specs_synced_at = NULL
+          WHERE tenant_id = $1 AND id = $2
+          RETURNING *`,
+        [tenantId, id, changes.displayName ?? null, changes.externalAccountId ?? null, changes.encryptedSecret ?? null]
+      );
+      return first(result, mapAccount);
+    }),
+
+  deleteAccount: (tenantId, id) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query('DELETE FROM channel_accounts WHERE tenant_id = $1 AND id = $2', [
+        tenantId,
+        id,
+      ]);
+      return (result.rowCount ?? 0) > 0;
+    }),
+
   updateAccountStatus: (tenantId, id, status) =>
     withTenant(tenantId, async (client) => {
       const result = await client.query(

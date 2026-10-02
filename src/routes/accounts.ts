@@ -5,7 +5,17 @@ import { postizIntegrationSettings } from '../channels/postiz/client';
 import { syncAccountProviderSpec } from '../channels/provider-specs';
 import { decryptSecret, encryptSecret } from '../security/secret-box';
 import { asyncHandler } from '../http/async-handler';
-import { appendAudit, getAccount, insertAccount, listAccounts, toPublicAccount, updateAccountStatus } from '../store';
+import {
+  appendAudit,
+  deleteAccount,
+  getAccount,
+  insertAccount,
+  listAccounts,
+  listJobs,
+  toPublicAccount,
+  updateAccount,
+  updateAccountStatus,
+} from '../store';
 import { requireRole, requireTenant, type AuthenticatedRequest } from '../http/tenant';
 import type { TenantRequest } from '../http/tenant';
 
@@ -23,6 +33,36 @@ const createAccountSchema = z.object({
 const statusSchema = z.object({
   status: z.enum(['pending', 'active', 'expired', 'revoked', 'error']),
 });
+
+/**
+ * Normaliza o identificador externo da conta.
+ *
+ * O `@` do Telegram e o caso que morde: o operador digita `@Estetichat` porque e
+ * assim que o username aparece no Telegram e no Chatwoot, e a busca pela conta
+ * passa a usar `@@Estetichat`, que nao casa com nada. Como nao havia como
+ * editar a conta, o erro ficava sem correcao. Aqui o `@` de leading e
+ * normalizado para exatamente um.
+ *
+ * Para as outras redes o valor entra como esta, porque cada provedor tem seu
+ * formato e adivinhar por conta seria pior do que preservar.
+ */
+const normalizeExternalAccountId = (network: string, value: string): string => {
+  const trimmed = value.trim();
+  if (network !== 'telegram') {
+    return trimmed;
+  }
+  return `@${trimmed.replace(/^@+/, '')}`;
+};
+
+const updateAccountSchema = z
+  .object({
+    displayName: z.string().min(1).max(120).optional(),
+    externalAccountId: z.string().min(1).max(200).optional(),
+    secret: z.string().min(1).optional(),
+  })
+  .refine((value) => Object.keys(value).length > 0, {
+    message: 'informe ao menos um campo para alterar',
+  });
 
 router.get(
   '/accounts',
@@ -44,7 +84,7 @@ router.post(
     let account = await insertAccount({
       tenantId: request.tenantId,
       network: input.network,
-      externalAccountId: input.externalAccountId,
+      externalAccountId: normalizeExternalAccountId(input.network, input.externalAccountId),
       displayName: input.displayName,
       encryptedSecret: encryptSecret(input.secret),
       scopes: input.scopes,
@@ -126,6 +166,110 @@ router.post(
     });
 
     res.json({ success: true, data: toPublicAccount(result.account) });
+  })
+);
+
+router.patch(
+  '/accounts/:id',
+  requireTenant,
+  requireRole('owner', 'admin'),
+  asyncHandler(async (req, res) => {
+    const request = req as AuthenticatedRequest;
+    const input = updateAccountSchema.parse(req.body);
+
+    const previous = await getAccount(request.tenantId, req.params.id);
+    if (!previous) {
+      res.status(404).json({ success: false, error: 'Conta nao encontrada' });
+      return;
+    }
+
+    const updated = await updateAccount(request.tenantId, req.params.id, {
+      displayName: input.displayName,
+      externalAccountId:
+        input.externalAccountId === undefined
+          ? undefined
+          : normalizeExternalAccountId(previous.network, input.externalAccountId),
+      encryptedSecret: input.secret === undefined ? undefined : encryptSecret(input.secret),
+    });
+
+    if (!updated) {
+      res.status(404).json({ success: false, error: 'Conta nao encontrada' });
+      return;
+    }
+
+    await appendAudit({
+      tenantId: request.tenantId,
+      actorUserId: request.userId,
+      actorEmail: request.email,
+      action: 'account.updated',
+      entityType: 'channel_account',
+      entityId: updated.id,
+      metadata: {
+        network: updated.network,
+        // O segredo novo NUNCA entra no audit: so o fato de que ele trocou.
+        secretRotated: input.secret !== undefined,
+        displayNameChanged: input.displayName !== undefined && input.displayName !== previous.displayName,
+        externalAccountIdChanged:
+          input.externalAccountId !== undefined &&
+          normalizeExternalAccountId(previous.network, input.externalAccountId) !==
+            previous.externalAccountId,
+      },
+    });
+
+    res.json({ success: true, data: toPublicAccount(updated) });
+  })
+);
+
+router.delete(
+  '/accounts/:id',
+  requireTenant,
+  requireRole('owner', 'admin'),
+  asyncHandler(async (req, res) => {
+    const request = req as AuthenticatedRequest;
+    const previous = await getAccount(request.tenantId, req.params.id);
+    if (!previous) {
+      res.status(404).json({ success: false, error: 'Conta nao encontrada' });
+      return;
+    }
+
+    // Publicar e a unica forma de a conta virar lixo: se ha job pendente ou em
+    // voo, apagar agora deixaria o worker sem destino para o resultado. O
+    // operador espera a fila drainar ou cancela antes.
+    const busy = await listJobs(request.tenantId);
+    const inFlight = busy.some(
+      (job) =>
+        job.channelAccountId === req.params.id &&
+        (job.status === 'queued' || job.status === 'running')
+    );
+    if (inFlight) {
+      res.status(409).json({
+        success: false,
+        error: 'Conta tem publicacoes pendentes; aguarde a fila esvaziar antes de excluir',
+      });
+      return;
+    }
+
+    const deleted = await deleteAccount(request.tenantId, req.params.id);
+    if (!deleted) {
+      res.status(404).json({ success: false, error: 'Conta nao encontrada' });
+      return;
+    }
+
+    await appendAudit({
+      tenantId: request.tenantId,
+      actorUserId: request.userId,
+      actorEmail: request.email,
+      action: 'account.deleted',
+      entityType: 'channel_account',
+      entityId: previous.id,
+      metadata: {
+        network: previous.network,
+        externalAccountId: previous.externalAccountId,
+        displayName: previous.displayName,
+      },
+    });
+
+    res.json({ success: true, data: { id: previous.id, deleted: true } });
   })
 );
 
