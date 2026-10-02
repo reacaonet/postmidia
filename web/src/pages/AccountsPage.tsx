@@ -121,6 +121,7 @@ export default function AccountsPage(): JSX.Element {
  * detail, o operador so sabe que "alguma coisa" falhou.
  */
 function SyncButton({ account, onSynced }: { account: ChannelAccount; onSynced: () => void }): JSX.Element {
+  const { token } = useSession();
   const { run, busy, error } = useAction();
   return (
     <>
@@ -129,7 +130,9 @@ function SyncButton({ account, onSynced }: { account: ChannelAccount; onSynced: 
         disabled={busy}
         onClick={() =>
           run(async () => {
-            await syncAccountSpecs('', account.id);
+            // O token vem da sessao, nunca de um literal: sem ele a API devolve
+            // 401 e o painel inteiro interpreta como "sessao expirada".
+            await syncAccountSpecs(token ?? '', account.id);
             onSynced();
           }).then((ok) => {
             if (ok) {

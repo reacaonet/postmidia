@@ -112,7 +112,7 @@ export default function LoginPage(): JSX.Element {
                     required
                     minLength={3}
                     maxLength={63}
-                    pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?"
+                    pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?"
                     placeholder="minha-loja"
                     autoComplete="organization"
                   />
@@ -132,7 +132,7 @@ export default function LoginPage(): JSX.Element {
                   required
                   minLength={3}
                   maxLength={63}
-                  pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?"
+                  pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?"
                   placeholder="minha-loja"
                 />
                 <div className="hint">
