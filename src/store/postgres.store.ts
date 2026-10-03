@@ -482,11 +482,18 @@ export const createPostgresStore = (): Store => ({
             SET display_name = COALESCE($3, display_name),
                 external_account_id = COALESCE($4, external_account_id),
                 encrypted_secret = COALESCE($5, encrypted_secret),
-                status = CASE WHEN $5::text IS NULL THEN status ELSE 'pending' END,
-                specs_synced_at = NULL
+                status = COALESCE($6, status),
+                specs_synced_at = CASE WHEN $5::text IS NULL THEN specs_synced_at ELSE NULL END
           WHERE tenant_id = $1 AND id = $2
           RETURNING *`,
-        [tenantId, id, changes.displayName ?? null, changes.externalAccountId ?? null, changes.encryptedSecret ?? null]
+        [
+          tenantId,
+          id,
+          changes.displayName ?? null,
+          changes.externalAccountId ?? null,
+          changes.encryptedSecret ?? null,
+          changes.status ?? null,
+        ]
       );
       return first(result, mapAccount);
     }),

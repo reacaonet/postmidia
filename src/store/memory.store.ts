@@ -229,8 +229,8 @@ export const createMemoryStore = (): Store => {
           : { externalAccountId: changes.externalAccountId }),
         ...(changes.encryptedSecret === undefined
           ? {}
-          : { encryptedSecret: changes.encryptedSecret, status: 'pending', specsSyncedAt: null }),
-        ...(changes.encryptedSecret === undefined ? {} : { specsSyncedAt: null }),
+          : { encryptedSecret: changes.encryptedSecret, specsSyncedAt: null }),
+        ...(changes.status === undefined ? {} : { status: changes.status }),
       };
       accounts.set(id, updated);
       return updated;

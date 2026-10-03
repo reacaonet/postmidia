@@ -190,6 +190,16 @@ router.patch(
           ? undefined
           : normalizeExternalAccountId(previous.network, input.externalAccountId),
       encryptedSecret: input.secret === undefined ? undefined : encryptSecret(input.secret),
+      // Rede com bridge so aceita publicar de novo depois que o sync valida o
+      // token novo, entao `pending` ate la. Rede nativa (telegram) nao tem sync:
+      // marcar `pending` deixaria a conta bloqueada para sempre, ja que o
+      // publish recusa status diferente de `active` e nada devolve a conta.
+      status:
+        input.secret === undefined
+          ? undefined
+          : isProviderSpecApplicable(previous.network)
+            ? 'pending'
+            : 'active',
     });
 
     if (!updated) {

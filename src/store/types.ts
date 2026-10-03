@@ -130,13 +130,23 @@ export interface Store {
    * Edita os campos que o operador corrige sem refazer a conexao. `secret` e
    * opcional de proposito: trocar o token da rede e uma operacao diferente de
    * arrumar um `@` duplicado no identificador, e quem chama decide o que mandou.
-   * Trocar o segredo tambem devolve a conta para `pending`, porque a validity do
-   * token novo e desconhecida ate o provedor responder.
+   *
+   * `status` tambem e do chamador, e nao derivado aqui: quem sabe se a rede tem
+   * um provedor que valida o token o qual(validacao) nao e a camada de storage.
+   * Redes com bridge voltam para `pending` ate o sync confirmar o token novo;
+   * redes nativas nao tem sync que as liberte, entao elas recebem `active` --
+   * senao a conta ficaria impedida de publicar para sempre, ja que `pending`
+   * bloqueia o publish e nao existe caminho de volta.
    */
   updateAccount(
     tenantId: string,
     id: string,
-    changes: { displayName?: string; externalAccountId?: string; encryptedSecret?: string }
+    changes: {
+      displayName?: string;
+      externalAccountId?: string;
+      encryptedSecret?: string;
+      status?: ChannelAccountStatus;
+    }
   ): Promise<ChannelAccount | undefined>;
   /** Apaga a conta do tenant. Devolve `false` se o id nao existe neste tenant. */
   deleteAccount(tenantId: string, id: string): Promise<boolean>;

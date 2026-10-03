@@ -367,11 +367,28 @@ EDITED=$(curl -s -m 20 -X PATCH "$BASE/accounts/$TGID" -H 'Content-Type: applica
   -d '{"displayName":"Itamidia Telecom","externalAccountId":"Estetichat2"}')
 check "editar conta" "$(printf '%s' "$EDITED" | j '.data.displayName')" "Itamidia Telecom"
 check "editar normaliza o @ de novo" "$(printf '%s' "$EDITED" | j '.data.externalAccountId')" "@Estetichat2"
-# Trocar o token nao pode deixar a conta publicando com um token que ninguem validou.
+# Rotacao de token: o status depende de a rede ter ou nao provedor que valide.
+# Com bridge, o token novo so vale depois que o sync confirma, entao `pending`.
+# Nativa (telegram) nao tem sync -- deixar `pending` trancava a conta para sempre,
+# porque o publish recusa status != active e nada voltava o status.
 ROTATED=$(curl -s -m 20 -X PATCH "$BASE/accounts/$TGID" -H 'Content-Type: application/json' -H "$AUTH" \
   -d '{"secret":"outro-token"}')
-check "trocar token devolve a conta para pendente" "$(printf '%s' "$ROTATED" | j '.data.status')" "pending"
+check "trocar token em rede nativa mantem a conta publicavel" "$(printf '%s' "$ROTATED" | j '.data.status')" "active"
 check "o segredo novo nunca volta na resposta" "$(printf '%s' "$ROTATED" | j '.data.encryptedSecret')" ""
+
+BRIDGED=$(curl -s -m 20 -X POST "$BASE/accounts" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d '{"network":"instagram","externalAccountId":"ig-123","displayName":"IG","secret":"tok"}')
+BRIDGEDID=$(printf '%s' "$BRIDGED" | j '.data.id')
+check "rede com bridge nasce ativa" "$(printf '%s' "$BRIDGED" | j '.data.status')" "active"
+BRIDGE_ROT=$(curl -s -m 20 -X PATCH "$BASE/accounts/$BRIDGEDID" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d '{"secret":"outro-token"}')
+check "trocar token em rede com bridge volta para pendente" "$(printf '%s' "$BRIDGE_ROT" | j '.data.status')" "pending"
+
+# Editar sem rotacionar o token nao pode mexer no status: arrumar o `@` duplicado
+# nao torna o token valido nem invalido.
+NAME_ONLY=$(curl -s -m 20 -X PATCH "$BASE/accounts/$TGID" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d '{"displayName":"Itamidia Telecom"}')
+check "editar sem token nao altera o status" "$(printf '%s' "$NAME_ONLY" | j '.data.status')" "active"
 check "editar sem campos" "$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X PATCH "$BASE/accounts/$TGID" -H 'Content-Type: application/json' -H "$AUTH" -d '{}')" "400"
 
 # Isolar o tenant antes de excluir: conta de outro tenant precisa ser 404, nao 200.
