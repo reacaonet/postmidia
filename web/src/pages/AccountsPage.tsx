@@ -8,7 +8,7 @@ import {
   syncAccountSpecs,
   updateAccount,
 } from '../api';
-import type { ChannelAccount, NetworkSpec } from '../api/types';
+import type { ChannelAccount, Network, NetworkSpec } from '../api/types';
 import { useAsync, useAction } from '../useAsync';
 import { useSession } from '../session';
 import { AccountPill, DateTime, Empty, ErrorBox, Loading, Pill } from '../components';
@@ -21,6 +21,14 @@ export default function AccountsPage(): JSX.Element {
   const networks = useAsync(() => getNetworks(), []);
 
   const specs = (networks.data?.data.specs ?? {}) as Record<string, NetworkSpec>;
+
+  // `bridgedViaPostiz` sao as redes cujo token o Postiz conhece. As demais sao
+  // nativas: nao existe endpoint de specs para elas e o `/sync-specs` responde
+  // 422. `undefined` enquanto `/networks` nao respondeu, para nao afirmar que uma
+  // rede e nativa antes de saber -- e esconder o botao que so pode falhar.
+  const bridged = networks.data?.data.bridgedViaPostiz;
+  const isNative = (network: string): boolean =>
+    bridged !== undefined && !bridged.includes(network as Network);
 
   return (
     <>
@@ -70,6 +78,7 @@ export default function AccountsPage(): JSX.Element {
               {accounts.data.data.map((account) => {
                 const spec = specs[account.network];
                 const effective = account.providerMaxLength ?? spec?.text.maxChars ?? null;
+                const native = isNative(account.network);
                 return (
                   <tr key={account.id}>
                     <td>
@@ -89,16 +98,23 @@ export default function AccountsPage(): JSX.Element {
                       ) : null}
                     </td>
                     <td>
-                      <DateTime value={account.specsSyncedAt} />
+                      {native ? (
+                        <span className="hint">rede nativa</span>
+                      ) : (
+                        <DateTime value={account.specsSyncedAt} />
+                      )}
                     </td>
                     <td>
                       <div className="actions">
                         <button className="secondary small" onClick={() => setSelected(account)}>
                           Detalhes
                         </button>
-                        {canWrite && (
-                          <SyncButton account={account} onSynced={accounts.reload} />
-                        )}
+                        {canWrite &&
+                          (native ? (
+                            <span className="hint">specs locais</span>
+                          ) : (
+                            <SyncButton account={account} onSynced={accounts.reload} />
+                          ))}
                       </div>
                     </td>
                   </tr>
