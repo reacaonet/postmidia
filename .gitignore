@@ -2,17 +2,26 @@ node_modules/
 dist/
 coverage/
 
-# Segredos. .env.example e versionado de proposito: e o template com
-# placeholders, e nao um .env.* generico para nao engolir o exemplo.
+# Nenhum arquivo de variavel entra no git, nem o `.example`.
+#
+# A convencao de versionar `.env.example` com placeholder pressupoe que ninguem
+# cole valor dentro dele. Aqui esse arquivo virou o caderno de credenciais (client
+# id, secret, token de bot), e um `git add -A` commitaria segredo vivo. O
+# `.gitignore` e a barreira real, entao ele entra tambem.
 .env
 .env.local
 .env.*.local
+.env.example
+.env.*.example
 
-# Credenciais das redes sociais do Postiz. O arquivo real e montado em
-# /app/.env dentro do container; o `.example` e versionado e fica sem valor.
-# Sem esta regra o `git add .` subiria os tokens de LinkedIn, Meta, TikTok e
-# Telegram no primeiro uso.
+# Credenciais das redes sociais do Postiz. O arquivo real entra no ambiente do
+# container pelo `env_file:` do docker-compose.yml.
+#
+# O `.example` tambem fica de fora pelo mesmo motivo: as instrucoes de redirect
+# URI e o formato das variaveis estao comentados dentro do arquivo real, e o
+# compose ja documenta o `env_file`.
 postiz-social.env
+postiz-social.env.example
 docker-compose.override.yml
 
 *.log

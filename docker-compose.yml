@@ -92,29 +92,41 @@ services:
       UPLOAD_DIRECTORY: /uploads
       NEXT_PUBLIC_UPLOAD_DIRECTORY: /uploads
       API_LIMIT: "30"
-      # As credenciais das redes sociais NAO vao aqui.
+      # As credenciais das redes sociais entram pelo `env_file`, NAO pelo bloco
+      # `environment:` acima.
       #
-      # O backend e o orquestrador do Postiz sobem com `dotenv -e ../../.env`,
-      # ou seja, leem /app/.env DENTRO do container — nao o `environment:` do
-      # compose. Listar aqui as 26 variaveis de rede social seria ignorado na
-      # totalidade, e daria a impressao de que o OAuth estava configurado.
+      # Motivo: o Postiz so le `process.env`, populado pelo Docker. Nao ha
+      # ConfigModule nem `dotenv -e` nesta imagem (v2.24.0) -- conferido no
+      # package.json e no app.module.ts. Ou seja: um arquivo montado dentro do
+      # container, como /app/.env, NUNCA e lido. Era exatamente por isso que
+      # LINKEDIN_CLIENT_ID e TIKTOK_CLIENT_ID chegavam vazios e o OAuth falhava
+      # com "You need to pass the client_id parameter".
       #
-      # Ver postiz-social.env.example e o ponto 1 do README.
+      # `env_file` injeta o conteudo no ambiente do container. Como o
+      # postiz-social.env esta no .gitignore, os segredos ficam fora do git, e
+      # este arquivo continua limpo. Depois de editar o arquivo:
+      #   docker compose up -d --force-recreate postiz
+    env_file:
+      - ./postiz-social.env
     ports:
-      - "4007:5000"
+      # 4007 dos dois lados. O nginx da imagem oficial escuta na 5000, mas o
+      # FRONTEND_URL e http://localhost:4007 e e ele que o Postiz usa para
+      # gravar a URL da midia no banco. Se o container so escutar na 5000,
+      # essa URL so resolve no navegador da maquina: o proprio Postiz, rodando
+      # dentro do container, leva ECONNREFUSED ao tentar ler a imagem.
+      # Ver postiz/nginx.conf.
+      - "4007:4007"
     volumes:
       - postiz-uploads:/uploads
-      # Monta o arquivo de credenciais do Postiz em /app/.env, que e o que o
-      # `dotenv -e ../../.env` dos processos le. O `:ro` impede o container de
-      # reescrever o arquivo — sem ele, um valor que o Postiz escrevesse
-      # voltaria para o seu arquivo local e apagaria a distinção entre o que
-      # voce digitou e o que ele injectou.
-      - ./postiz-social.env:/app/.env:ro
+      # nginx da imagem com `listen 4007`, para localhost:4007 valer tanto no
+      # navegador quanto de dentro do container. Alvo do proxy interno (3000) e
+      # do frontend (4200) seguem intactos.
+      - ./postiz/nginx.conf:/etc/nginx/nginx.conf:ro
     healthcheck:
       # A imagem do Postiz nao tem wget, curl nem nc, entao o healthcheck usa o
       # node que ja roda o Nest. A API publica responde 401 sem API key: e o
       # sinal de que o backend subiu de verdade, e nao so o nginx escutando.
-      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:5000/api/public/v1/posts',r=>process.exit(r.statusCode===401||r.statusCode===403?0:1)).on('error',()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:4007/api/public/v1/posts',r=>process.exit(r.statusCode===401||r.statusCode===403?0:1)).on('error',()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 30
