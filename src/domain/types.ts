@@ -16,6 +16,8 @@ export interface ChannelAccount {
   externalAccountId: string;
   displayName: string;
   encryptedSecret: string;
+  /** OAuth: token de renovacao. NULL quando a rede nao tem renovacao. */
+  encryptedRefreshToken: string | null;
   scopes: string[];
   status: ChannelAccountStatus;
   tokenExpiresAt: string | null;
@@ -27,7 +29,13 @@ export interface ChannelAccount {
   createdAt: string;
 }
 
-export type PublicChannelAccount = Omit<ChannelAccount, 'encryptedSecret'>;
+/**
+ * Os dois segredos ficam fora do tipo publico por construcao, e nao por
+ * esquecimento de apagar campo: `Omit` do segredo e do refresh juntos. O
+ * refresh concede um access token novo sozinho, entao vaza-lo e tao grave quanto
+ * vazar o access token -- e com uma janela de uso maior.
+ */
+export type PublicChannelAccount = Omit<ChannelAccount, 'encryptedSecret' | 'encryptedRefreshToken'>;
 
 export type ResolvedChannelAccount = Omit<ChannelAccount, 'encryptedSecret'> & { secret: string };
 

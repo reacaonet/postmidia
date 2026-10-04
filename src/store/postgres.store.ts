@@ -45,6 +45,7 @@ const mapAccount = (row: Row): ChannelAccount => ({
   externalAccountId: String(row.external_account_id),
   displayName: String(row.display_name),
   encryptedSecret: String(row.encrypted_secret),
+  encryptedRefreshToken: row.encrypted_refresh_token == null ? null : String(row.encrypted_refresh_token),
   scopes: (row.scopes as string[]) ?? [],
   status: row.status as ChannelAccount['status'],
   tokenExpiresAt: isoOrNull(row.token_expires_at),
@@ -424,8 +425,9 @@ export const createPostgresStore = (): Store => ({
     withTenant(input.tenantId, async (client) => {
       const result = await client.query(
         `INSERT INTO channel_accounts
-           (tenant_id, network, external_account_id, display_name, encrypted_secret, scopes, status, token_expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           (tenant_id, network, external_account_id, display_name, encrypted_secret,
+            encrypted_refresh_token, scopes, status, token_expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING *`,
         [
           input.tenantId,
@@ -433,6 +435,7 @@ export const createPostgresStore = (): Store => ({
           input.externalAccountId,
           input.displayName,
           input.encryptedSecret,
+          input.encryptedRefreshToken ?? null,
           input.scopes,
           input.status,
           input.tokenExpiresAt,
@@ -482,7 +485,9 @@ export const createPostgresStore = (): Store => ({
             SET display_name = COALESCE($3, display_name),
                 external_account_id = COALESCE($4, external_account_id),
                 encrypted_secret = COALESCE($5, encrypted_secret),
+                encrypted_refresh_token = COALESCE($7, encrypted_refresh_token),
                 status = COALESCE($6, status),
+                token_expires_at = COALESCE($8, token_expires_at),
                 specs_synced_at = CASE WHEN $5::text IS NULL THEN specs_synced_at ELSE NULL END
           WHERE tenant_id = $1 AND id = $2
           RETURNING *`,
@@ -493,6 +498,8 @@ export const createPostgresStore = (): Store => ({
           changes.externalAccountId ?? null,
           changes.encryptedSecret ?? null,
           changes.status ?? null,
+          changes.encryptedRefreshToken ?? null,
+          changes.tokenExpiresAt ?? null,
         ]
       );
       return first(result, mapAccount);
@@ -568,6 +575,59 @@ export const createPostgresStore = (): Store => ({
         id,
       ]);
       return first(result, mapPost);
+    }),
+
+  listPosts: (tenantId, filter = {}) =>
+    withTenant(tenantId, async (client) => {
+      const values: unknown[] = [tenantId];
+      const conditions = ['tenant_id = $1'];
+
+      if (filter.campaignId) {
+        conditions.push(`campaign_id = $${values.length + 1}`);
+        values.push(filter.campaignId);
+      }
+
+      // Mais recente primeiro: o operador abre a campanha para corrigir o que
+      // acabou de agendar, nao o primeiro post de seis meses atras.
+      const result = await client.query(
+        `SELECT * FROM posts WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC`,
+        values
+      );
+      return result.rows.map(mapPost);
+    }),
+
+  updatePost: (tenantId, id, changes) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE posts
+            SET content_type = COALESCE($3, content_type),
+                text = COALESCE($4, text),
+                media = COALESCE($5::jsonb, media),
+                settings = COALESCE($6::jsonb, settings)
+          WHERE tenant_id = $1 AND id = $2
+          RETURNING *`,
+        [
+          tenantId,
+          id,
+          changes.contentType ?? null,
+          changes.text ?? null,
+          changes.media === undefined ? null : JSON.stringify(changes.media),
+          changes.settings === undefined ? null : JSON.stringify(changes.settings),
+        ]
+      );
+      return first(result, mapPost);
+    }),
+
+  updateJobSchedule: (tenantId, id, scheduledAt) =>
+    withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE publish_jobs
+            SET scheduled_at = $3, updated_at = now()
+          WHERE tenant_id = $1 AND id = $2
+          RETURNING *`,
+        [tenantId, id, scheduledAt]
+      );
+      return first(result, mapJob);
     }),
 
   insertJob: (input: JobInput) =>
@@ -664,6 +724,12 @@ export const createPostgresStore = (): Store => ({
       if (filter.campaignId) {
         conditions.push(`post_id IN (SELECT id FROM posts WHERE campaign_id = $${position})`);
         values.push(filter.campaignId);
+        position += 1;
+      }
+
+      if (filter.postId) {
+        conditions.push(`post_id = $${position}`);
+        values.push(filter.postId);
         position += 1;
       }
 

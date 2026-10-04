@@ -1,5 +1,6 @@
 import { Queue, Worker, type JobsOptions } from 'bullmq';
 import IORedis from 'ioredis';
+import { randomUUID } from 'node:crypto';
 import { env } from '../config';
 import type { PublishJob } from '../domain/types';
 import type { PublishJobHandler, PublishQueue } from './publish.queue';
@@ -120,6 +121,32 @@ export const createRedisQueue = (): PublishQueue => {
         .catch((error) => {
           console.error(`[fila] falha ao cancelar ${jobId}: ${(error as Error).message}`);
         });
+    },
+
+    async reschedule(job: PublishJob, delayMs: number): Promise<void> {
+      if (closed) {
+        throw new Error('Fila encerrada');
+      }
+
+      // Remover e adicionar no mesmo passo: se o `add` viesse antes, a busca
+      // abaixo acharia a entrada nova (mesmo `data.id`) e apagaria o agendamento
+      // recem-criado. O `dispatchKey` novo evita que o `add` colida com o id da
+      // entrada antiga, que o BullMQ Aceitaria em silencio sem rodar nada.
+      const entries = await queue.getJobs(['waiting', 'delayed']);
+      for (const candidate of entries) {
+        if (candidate.data.id === job.id && candidate.id) {
+          try {
+            await candidate.remove();
+          } catch {
+            // O worker ja puxou a entrada; nao ha o que remover.
+          }
+        }
+      }
+
+      const options: JobsOptions =
+        delayMs > 0 ? { ...baseOptions, delay: delayMs } : { ...baseOptions };
+
+      await queue.add('publish', job, { ...options, jobId: entryId(job, randomUUID()) });
     },
 
     async close(): Promise<void> {

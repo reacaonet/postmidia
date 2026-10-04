@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { isNetwork, isProviderSpecApplicable, NETWORK_SPECS } from '../domain/networks';
 import { postizIntegrationSettings } from '../channels/postiz/client';
+import { checkCredential } from '../channels/credential-check';
 import { syncAccountProviderSpec } from '../channels/provider-specs';
 import { decryptSecret, encryptSecret } from '../security/secret-box';
 import { asyncHandler } from '../http/async-handler';
@@ -64,6 +65,31 @@ const updateAccountSchema = z
     message: 'informe ao menos um campo para alterar',
   });
 
+/**
+ * Recusa o cadastro quando o provedor nao reconhece a credencial.
+ *
+ * O ganho nao e so recusar token furado: `identity.externalAccountId` volta
+ * canonicalizado pelo provedor e substitui o que o operador digitou. Um URN de
+ * LinkedIn montado a mao e um `@canal` com `@` a mais sao gravados na forma que
+ * a API aceita, porque o provedor e a fonte da verdade, nao o texto da caixa.
+ */
+const assertCredential = async (
+  network: string,
+  secret: string,
+  externalAccountId: string
+): Promise<string> => {
+  const check = await checkCredential(network as never, secret, externalAccountId);
+
+  if (!check.ok) {
+    throw Object.assign(new Error(check.error), {
+      statusCode: 400,
+      hint: check.hint,
+    });
+  }
+
+  return check.identity.externalAccountId || externalAccountId;
+};
+
 router.get(
   '/accounts',
   requireTenant,
@@ -80,13 +106,19 @@ router.post(
   asyncHandler(async (req, res) => {
     const request = req as AuthenticatedRequest;
     const input = createAccountSchema.parse(req.body);
+    const normalized = normalizeExternalAccountId(input.network, input.externalAccountId);
+
+    const externalAccountId = await assertCredential(input.network, input.secret, normalized);
 
     let account = await insertAccount({
       tenantId: request.tenantId,
       network: input.network,
-      externalAccountId: normalizeExternalAccountId(input.network, input.externalAccountId),
+      externalAccountId,
       displayName: input.displayName,
       encryptedSecret: encryptSecret(input.secret),
+      // Token colado no painel nao tem de onde renovar: o provedor deu um token
+      // de longa duracao. Quem renova e a conexao por OAuth.
+      encryptedRefreshToken: null,
       scopes: input.scopes,
       status: 'active',
       tokenExpiresAt: input.tokenExpiresAt,
@@ -183,12 +215,25 @@ router.patch(
       return;
     }
 
+    // Trocar o segredo e trocar o destino sao a mesma decisao para o provedor:
+    // um token novo com o chat antigo continua quebrado, e vice-versa. Por isso
+    // o par que vai valer e validado junto, e nao campo por campo.
+    let externalAccountId: string | undefined;
+    if (input.secret !== undefined || input.externalAccountId !== undefined) {
+      const candidate = normalizeExternalAccountId(
+        previous.network,
+        input.externalAccountId ?? previous.externalAccountId
+      );
+      externalAccountId = await assertCredential(
+        previous.network,
+        input.secret ?? decryptSecret(previous.encryptedSecret),
+        candidate
+      );
+    }
+
     const updated = await updateAccount(request.tenantId, req.params.id, {
       displayName: input.displayName,
-      externalAccountId:
-        input.externalAccountId === undefined
-          ? undefined
-          : normalizeExternalAccountId(previous.network, input.externalAccountId),
+      externalAccountId,
       encryptedSecret: input.secret === undefined ? undefined : encryptSecret(input.secret),
       // Rede com bridge so aceita publicar de novo depois que o sync valida o
       // token novo, entao `pending` ate la. Rede nativa (telegram) nao tem sync:

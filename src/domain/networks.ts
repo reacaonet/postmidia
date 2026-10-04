@@ -12,13 +12,13 @@ export type Aspect = 'square' | 'vertical' | 'landscape' | 'any';
 export type MediaKind = 'image' | 'video';
 
 /**
- * Redes cuja publicacao e delegada ao Postiz. Telegram e WhatsApp sao nativos,
- * entao nao tem provedor autoritativo de specs para consultar (Fase 7).
+ * Redes cuja publicacao e delegada ao Postiz. Telegram, WhatsApp e LinkedIn sao
+ * nativos: o token entra pelo painel e a publicacao vai direto ao provedor, sem
+ * exigir cadastro no container do Postiz.
  */
 export const POSTIZ_BRIDGED_NETWORKS: readonly Network[] = [
   'instagram',
   'facebook',
-  'linkedin',
   'tiktok',
   'youtube',
   'x',

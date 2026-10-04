@@ -43,6 +43,24 @@ redis_count() {
   ' 2>/dev/null
 }
 
+# Quantas entradas do delayed pertencem a um job. Contar, e nao procurar, e o que
+# faz a checagem valer: `reschedule` cria a entrada nova com um `dispatchKey`
+# novo, mas o prefixo continua sendo `<jobId>#`, entao as duas share o prefixo e
+# um "tem alguma?" nao distingue "sobrou a antiga" de "substituiu de vez".
+redis_delayed_count() {
+  node -e '
+    const Redis = require("ioredis");
+    const r = new Redis(process.env.REDIS_URL, { maxRetriesPerRequest: 1, retryStrategy: () => null });
+    r.zrange("bull:postmidia-publish:delayed", 0, -1)
+      .then((members) => {
+        console.log(members.filter((m) => m.startsWith(process.argv[1] + "#")).length);
+        process.exit(0);
+      })
+      .catch(() => { console.log("erro"); process.exit(1); })
+      .finally(() => r.disconnect());
+  ' "$1" 2>/dev/null
+}
+
 ok()   { PASS=$((PASS+1)); echo "  ok   $1"; }
 bad()  { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 check() { if [ "$2" = "$3" ]; then ok "$1 ($2)"; else bad "$1: esperado $3, veio $2"; fi; }
@@ -118,6 +136,16 @@ export EMBEDDED_WORKER
 # ficaria sem cobertura.
 METRICS_TOKEN='e2e-metrics-token-de-teste-000000000000'
 export METRICS_TOKEN
+
+# O cadastro de conta consulta o provedor para provar que o token existe, e
+# recusa o que o provedor nao reconhece. A suite cadastra conta de Telegram com
+# o token ficticio "tok" (ver secoes 7 e 8), que o Telegram rejeitaria -- e com
+# razao, ele e mesmo um token invalido. Sem desligar a checagem, cada cadastro
+# da suite viraria 400 e o resto do teste mediria a falha do cadastro em vez do
+# que cada secao existe para medir. O caminho feliz da checagem e coberto em
+# src/channels/credential-check.ts e precisa de um token real.
+ACCOUNT_CREDENTIAL_CHECK_ENABLED=false
+export ACCOUNT_CREDENTIAL_CHECK_ENABLED
 
 npx ts-node --transpile-only src/server.ts > /tmp/api.log 2>&1 &
 API_PID=$!
@@ -549,6 +577,9 @@ check "requeue de job ja publicado (409)" "$CODE" "409"
 DWA3=$(dlq_account 3)
 DLQRESP3=$(curl -s -m 20 -X POST "$BASE/campaigns/$CAMP/posts" -H 'Content-Type: application/json' -H "$AUTH" -d "$(dlq_post 5511900000006 "$DWA3")")
 DLQJOB3=$(printf '%s' "$DLQRESP3" | j '.data.jobs[0].id')
+# O post deste job vira o caso de "ja publicado" da secao 13: e o unico jeito de
+# ter um post com job executado sem esperar o worker de novo.
+DLQPOST3=$(printf '%s' "$DLQRESP3" | j '.data.post.id')
 [ -n "$DLQJOB3" ] || { bad "sem terceiro job para dead-letterar: $(printf '%s' "$DLQRESP3" | head -c 300)"; exit 1; }
 DLQFILE3=/tmp/dlq-entry-3.txt
 npx ts-node --transpile-only scripts/seed-dead-letter.ts "$SLUG" "$DLQJOB3" "$(cygpath -w "$DLQFILE3")" >/dev/null 2>&1
@@ -799,6 +830,117 @@ check "a auditoria guarda o status de origem" "$(printf '%s' "$AUDT" | j ".data.
 # lista viria vazia.
 FORCED=$(curl -s -m 20 "$BASE/whatsapp/templates" -H "$AUTH" -H 'X-Tenant-Id: 00000000-0000-0000-0000-000000000000')
 check "o header nao sobrepoe o token assinado" "$(printf '%s' "$FORCED" | j ".data.filter(x=>x.id==='$TPLID').length")" "1"
+
+echo ""
+echo "=== 13. editar conteudo, reagendar e enviar agora ==="
+
+# O worker remanescente da secao 7 e o que faz o post da fila morta rodar, entao
+# ele so pode morrer aqui, depois da secao 10. Sem worker os jobs deste bloco
+# ficam `queued`, que e o estado unico em que as tres operacoes fazem sentido.
+kill_tree "$WORKER2_PID"
+WORKER2_PID=""
+sleep 2
+
+EWA=$(curl -s -m 20 -X POST "$BASE/accounts" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d '{"network":"whatsapp","externalAccountId":"wa-edit-e2e","displayName":"WA Edit","secret":"tok"}' | j '.data.id')
+[ -n "$EWA" ] && ok "conta para edicao criada" || { bad "conta para edicao nao criada"; exit 1; }
+
+ECAMP=$(curl -s -m 20 -X POST "$BASE/campaigns" -H 'Content-Type: application/json' -H "$AUTH" -d '{"name":"Edicao"}' | j '.data.id')
+WHEN3=$(node -e "console.log(new Date(Date.now()+86400000).toISOString())")
+ERESP=$(curl -s -m 20 -X POST "$BASE/campaigns/$ECAMP/posts" -H 'Content-Type: application/json' -H "$AUTH" \
+  -d "$(node -e "console.log(JSON.stringify({contentType:'template',text:'antes',media:[],settings:{templateName:'promo',languageCode:'pt_BR',bodyParams:[]},accountIds:['$EWA'],audience:['5511900000011','5511900000012'],scheduledAt:'$WHEN3'}))")")
+EPOST=$(printf '%s' "$ERESP" | j '.data.post.id')
+EJOB=$(printf '%s' "$ERESP" | j '.data.jobs[0].id')
+EJOB2=$(printf '%s' "$ERESP" | j '.data.jobs[1].id')
+check "post de edicao criado com 2 jobs" "$(printf '%s' "$ERESP" | j '.data.jobs.length')" "2"
+[ -n "$EPOST" ] && [ -n "$EJOB" ] || { bad "post de edicao sem id: $(printf '%s' "$ERESP" | head -c 300)"; exit 1; }
+# Prova de nao-vacuidade: a contagem do delayed abaixo so vale se o job comecou
+# dentro dele.
+check "o job agendado esta no delayed" "$(redis_delayed_count "$EJOB")" "1"
+
+# --- listar os posts da campanha ---
+POSTS=$(curl -s -m 20 "$BASE/campaigns/$ECAMP/posts" -H "$AUTH")
+check "posts da campanha listados" "$(printf '%s' "$POSTS" | j '.data.length')" "1"
+check "a listagem traz o post certo" "$(printf '%s' "$POSTS" | j ".data[0].id")" "$EPOST"
+
+# --- editar o conteudo enquanto nada rodou ---
+EDIT=$(curl -s -m 20 -X PATCH "$BASE/posts/$EPOST" -H 'Content-Type: application/json' -H "$AUTH" -d '{"text":"depois"}')
+check "texto editado" "$(printf '%s' "$EDIT" | j '.data.post.text')" "depois"
+check "campo ausente fica como estava" "$(printf '%s' "$EDIT" | j '.data.post.contentType')" "template"
+check "a listagem reflete a edicao" "$(curl -s -m 20 "$BASE/campaigns/$ECAMP/posts" -H "$AUTH" | j '.data[0].text')" "depois"
+
+# --- a edicao passa pela mesma validacao por conta da criacao ---
+# O WhatsApp limita o texto a 1024 caracteres. Sem esta checagem, um PATCH que
+# nao validasse aceitaria texto que a rota de criacao recusa, e o painel deixaria
+# de avisar o operador antes do 422.
+LONGTEXT=/tmp/edit-long.json
+node -e "require('fs').writeFileSync(process.argv[1], JSON.stringify({text:'a'.repeat(5000)}))" "$(cygpath -w "$LONGTEXT")"
+EDITLONG=$(curl -s -m 20 -o /tmp/edit-long-resp.json -w '%{http_code}' -X PATCH "$BASE/posts/$EPOST" \
+  -H 'Content-Type: application/json' -H "$AUTH" --data-binary @"$LONGTEXT")
+check "texto longo na edicao (422)" "$EDITLONG" "422"
+grep -q 'text_too_long' /tmp/edit-long-resp.json && ok "o 422 da edicao aponta text_too_long" || bad "o 422 da edicao nao aponta text_too_long: $(head -c 200 /tmp/edit-long-resp.json)"
+check "o 422 nao alterou o texto" "$(curl -s -m 20 "$BASE/campaigns/$ECAMP/posts" -H "$AUTH" | j '.data[0].text')" "depois"
+
+# --- post com job executado nao edita ---
+# O job foi descartado na fila morta e esta `failed`: o worker chegou a chamar a
+# rede, entao o texto gravado virou o registro do que saiu.
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X PATCH "$BASE/posts/$DLQPOST3" -H 'Content-Type: application/json' -H "$AUTH" -d '{"text":"tentativa"}')
+check "editar post ja publicado (409)" "$CODE" "409"
+
+# --- reactschede ---
+NEWWHEN=$(node -e "console.log(new Date(Date.now()+172800000).toISOString())")
+RESC=$(curl -s -m 20 -X PATCH "$BASE/jobs/$EJOB/schedule" -H 'Content-Type: application/json' -H "$AUTH" -d "{\"scheduledAt\":\"$NEWWHEN\"}")
+check "job reagendado" "$(printf '%s' "$RESC" | j '.data.job.scheduledAt')" "$NEWWHEN"
+check "reagendar devolve o job queued" "$(printf '%s' "$RESC" | j '.data.job.status')" "queued"
+
+# O reagendamento reescreve a entrada do Redis. A contagem continua 1 porque a
+# antiga saiu e a nova entrou; se a remocao falhasse, sobrariam duas, e o job
+# publicaria em duplicado.
+check "reagendar nao deixou entrada duplicada" "$(redis_delayed_count "$EJOB")" "1"
+
+# --- enviar agora ---
+# O `dispatch` e o mesmo caminho do reagendamento, com o horario corrente. Sem
+# worker a entrada fica em `waiting`, o que e o unico jeito de provar que o
+# reagendamento trocou a entrada do Redis em vez de so mexer na coluna.
+DISP=$(curl -s -m 20 -X POST "$BASE/jobs/$EJOB/dispatch" -H "$AUTH")
+check "enviar agora responde" "$(printf '%s' "$DISP" | j '.data.job.status')" "queued"
+DISPDIFF=$(node -e "const o=JSON.parse(process.argv[1]);console.log(Math.abs(Date.now()-new Date(o.data.job.scheduledAt).getTime()))" "$DISP")
+[ "$DISPDIFF" -lt 10000 ] 2>/dev/null && ok "enviar agora puxou o horario para agora (${DISPDIFF}ms)" || bad "enviar agora nao mudou o horario (delta ${DISPDIFF}ms)"
+check "a entrada saiu do delayed" "$(redis_delayed_count "$EJOB")" "0"
+
+# --- guarda de status no reagendamento e no envio imediato ---
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X PATCH "$BASE/jobs/$DLQJOB3/schedule" -H 'Content-Type: application/json' -H "$AUTH" -d "{\"scheduledAt\":\"$NEWWHEN\"}")
+check "reagendar job failed (409)" "$CODE" "409"
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X POST "$BASE/jobs/$DLQJOB3/dispatch" -H "$AUTH")
+check "enviar agora em job failed (409)" "$CODE" "409"
+
+# --- corpo invalido e recurso alheio ---
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X PATCH "$BASE/jobs/$EJOB/schedule" -H 'Content-Type: application/json' -H "$AUTH" -d '{}')
+check "reagendar sem scheduledAt (400)" "$CODE" "400"
+# O dispatch nao le o corpo, mas o parser de JSON do Express roda antes da rota:
+# corpo malformado e 400 em qualquer POST da API, e o 400 aqui nao diz nada
+# sobre o job. O que importa e que sem corpo nenhum o dispatch funciona, que e
+# como o painel chama. O job usado aqui e o segundo do post, que segue em
+# `queued`: reaproveitar o ja despachado mediria o status, nao o corpo.
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X POST "$BASE/jobs/$EJOB2/dispatch" -H "$AUTH")
+check "enviar agora sem corpo" "$CODE" "200"
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X PATCH "$BASE/posts/00000000-0000-0000-0000-000000000000" -H 'Content-Type: application/json' -H "$AUTH" -d '{"text":"x"}')
+check "editar post inexistente (404)" "$CODE" "404"
+
+# O job de outro tenant tem de ser 404, e nao um 409 de status: o vazamento de
+# existencia ja aparece na mensagem de "so job na fila".
+CODE=$(curl -s -m 20 -o /dev/null -w '%{http_code}' -X PATCH "$BASE/jobs/00000000-0000-0000-0000-000000000000/schedule" -H 'Content-Type: application/json' -H "$AUTH" -d "{\"scheduledAt\":\"$NEWWHEN\"}")
+check "reagendar job inexistente (404)" "$CODE" "404"
+
+# --- auditoria das tres operacoes ---
+AUDT2=$(curl -s -m 20 "$BASE/audit?limit=500" -H "$AUTH")
+for action in post.updated job.rescheduled job.dispatch_now; do
+  N=$(printf '%s' "$AUDT2" | j ".data.filter(x=>x.action==='$action').length")
+  [ "$N" -gt 0 ] 2>/dev/null && ok "$action auditado ($N entradas)" || bad "$action nao auditado"
+done
+# A edicao registra QUANTOS jobs foram afetados: sem esse numero o log nao diz
+# quanta coisa estava na fila quando o texto mudou.
+check "a auditoria da edicao conta os jobs afetados" "$(printf '%s' "$AUDT2" | j ".data.filter(x=>x.action==='post.updated').map(x=>x.metadata.affectedJobs).indexOf(2) >= 0")" "true"
 
 # A limpeza final e feita pelo trap de EXIT, que tambem cobre o caminho de erro.
 echo ""

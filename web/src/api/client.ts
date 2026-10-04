@@ -17,6 +17,15 @@ export interface ApiErrorBody {
   success: false;
   error: string;
   detail?: string;
+  /**
+   * Acao concreta que resolve o erro, quando a API sabe dizer qual e.
+   *
+   * O caso que originou o campo: o Telegram devolve `chat not found` para um
+   * token perfectly valido quando o bot nao esta no canal. A `error` sozinha
+   * descreve o sintoma e nao o conserto -- sem o `hint`, o operador le "token
+   * invalido" e troca o token, que ja estava certo.
+   */
+  hint?: string;
   data?: unknown;
 }
 
@@ -216,6 +225,13 @@ export function describeError(error: unknown): string {
   // 502 do sync-specs traz `detail` alem do `error`.
   if (error.body?.detail) {
     return `${error.message} — ${error.body.detail}`;
+  }
+
+  // O `hint` vem depois de `detail` de proposito: quando os dois existem, o
+  // `detail` e o diagnostico e o `hint` e a instrucao, e a instrucao e o que o
+  // operador precisa ver por ultimo.
+  if (error.body?.hint) {
+    return `${error.message} — ${error.body.hint}`;
   }
 
   return error.message;

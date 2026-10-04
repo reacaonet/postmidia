@@ -12,6 +12,7 @@ import type { ChannelAccount, Network, NetworkSpec } from '../api/types';
 import { useAsync, useAction } from '../useAsync';
 import { useSession } from '../session';
 import { AccountPill, DateTime, Empty, ErrorBox, Loading, Pill } from '../components';
+import { ConnectAccount } from './ConnectAccount';
 
 export default function AccountsPage(): JSX.Element {
   const { token, canWrite } = useSession();
@@ -38,7 +39,10 @@ export default function AccountsPage(): JSX.Element {
       </p>
 
       {canWrite ? (
-        <NewAccountForm specs={specs} onCreated={accounts.reload} />
+        <>
+          <ConnectAccount onConnected={accounts.reload} />
+          <NewAccountForm specs={specs} onCreated={accounts.reload} />
+        </>
       ) : (
         <div className="alert info">
           Seu papel é <strong>member</strong>: você pode consultar, mas não criar nem sincronizar. Peça a um
@@ -267,8 +271,16 @@ const NewAccountForm = ({
           <div className="hint">
             Cifrado com AES-256-GCM antes de ir ao banco. Não é retornado em nenhuma resposta.
             {network === 'whatsapp' && ' Para WhatsApp, é o token da Graph API.'}
+            {network === 'linkedin' &&
+              ' Para LinkedIn, é o access token de membro (w_member_social). Client ID e Client Secret do app não servem: são credenciais do aplicativo e a API responde "Invalid access token".'}
           </div>
         </label>
+
+        <div className="hint">
+          O token é conferido com a rede antes de a conta ser salva. Se a rede recusar, o cadastro
+          não é feito e a mensagem diz o que corrigir — inclusive quando o token está certo e o
+          problema é outro (no Telegram, o bot não estar como administrador do canal).
+        </div>
 
         {spec && (
           <div className="alert info" style={{ fontSize: 12 }}>

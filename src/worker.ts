@@ -2,11 +2,91 @@
 import { bootstrapAdapters } from './channels/bootstrap';
 import { hasAdapter, resolveAdapter } from './channels/registry';
 import { PublishError, type PublishSpec } from './channels/adapter';
+import { OAuthError, refreshTokens } from './channels/oauth/tokens';
 import { queue } from './queue';
-import { decryptSecret } from './security/secret-box';
-import { appendAudit, getAccount, getJob, getPost, patchJob, updateAccountStatus, upsertDeadLetter } from './store';
+import { decryptSecret, encryptSecret } from './security/secret-box';
+import { appendAudit, getAccount, getJob, getPost, patchJob, updateAccount, updateAccountStatus, upsertDeadLetter } from './store';
 import { startReconciler, stopReconciler } from './reconcile';
-import type { PublishJob, ResolvedChannelAccount } from './domain/types';
+import type { ChannelAccount, PublishJob, ResolvedChannelAccount } from './domain/types';
+
+/**
+ * Margem antes do vencimento.
+ *
+ * Renovar no instante exato do vencimento e pedir para a publicacao succeeding
+ * numa corrida: o token pode vencer no meio do upload da imagem, e o provedor
+ * devolve 401 depois de o job ter consumido tentativa. Renovando antes, a troca
+ * acontece enquanto o token ainda vale.
+ */
+const EXPIRY_MARGIN_MS = 5 * 60_000;
+
+const isExpired = (tokenExpiresAt: string | null): boolean => {
+  if (!tokenExpiresAt) {
+    return false;
+  }
+  const at = Date.parse(tokenExpiresAt);
+  return Number.isNaN(at) ? false : at - EXPIRY_MARGIN_MS <= Date.now();
+};
+
+/**
+ * Renova o access token e persiste o novo.
+ *
+ * Devolve `null` quando nao ha como renovar, para o chamador publicar com o
+ * token que tem: conexao por token colado (`encryptedRefreshToken` nulo) nao tem
+ * de onde renovar, e o erro real de 401 continua sendo o diagnostico util.
+ *
+ * Quando ha refresh token e a renovacao falha de vez, a conta vai para `error`.
+ * Sem isso a conta ficaria `active` e o operador veria todo post falhar sem
+ * nenhuma pista de que a solucao e reconectar.
+ */
+const renewIfPossible = async (
+  account: ChannelAccount
+): Promise<ResolvedChannelAccount | null> => {
+  if (!account.encryptedRefreshToken) {
+    return null;
+  }
+
+  let tokens;
+
+  try {
+    tokens = await refreshTokens(account.network, decryptSecret(account.encryptedRefreshToken));
+  } catch (error) {
+    if (error instanceof OAuthError) {
+      await updateAccountStatus(account.tenantId, account.id, 'error');
+    }
+    return null;
+  }
+
+  const updated = await updateAccount(account.tenantId, account.id, {
+    // Cifrado de novo como veio do provedor: `updateAccount` grava em
+    // `encrypted_secret`, e passar o access token puro ali colocaria um token
+    // de membro de 60 dias legivel no banco.
+    encryptedSecret: encryptSecret(tokens.accessToken),
+    tokenExpiresAt: tokens.expiresAt,
+    // Depende de o provedor rotacionar ou nao o refresh token. LinkedIn
+    // rotaciona, e o antigo morre: ignorar este campo faz a conta renovar uma
+    // vez e nunca mais. `refreshTokens` devolve o anterior quando a resposta
+    // vem sem `refresh_token`, entao gravar sempre e seguro.
+    encryptedRefreshToken: tokens.refreshToken
+      ? encryptSecret(tokens.refreshToken)
+      : undefined,
+  });
+
+  if (!updated) {
+    return null;
+  }
+
+  await appendAudit({
+    tenantId: account.tenantId,
+    actorUserId: null,
+    actorEmail: 'sistema@renovacao',
+    action: 'account.token_refreshed',
+    entityType: 'channel_account',
+    entityId: account.id,
+    metadata: { network: account.network, expiresAt: tokens.expiresAt },
+  });
+
+  return { ...updated, secret: tokens.accessToken };
+};
 
 
 const backoffMs = (attempts: number): number =>
@@ -107,10 +187,25 @@ const handleJob = async (job: PublishJob): Promise<void> => {
     return;
   }
 
-  const resolvedAccount: ResolvedChannelAccount = {
+const resolvedAccount: ResolvedChannelAccount = {
     ...account,
     secret: decryptSecret(account.encryptedSecret),
   };
+
+  // Um access token vencido e recusado pelo provedor com 401, que e
+  // indistinguivel de token revogado na hora em que chega no worker. Como a
+  // renovacao e barata e local, ela acontece aqui: sem isso, uma conta
+  // conectada por OAuth passaria a falhar todo post na data em que o token
+  // vence, e o operador teria que reconectar manualmente.
+  let accountForPublish = resolvedAccount;
+
+  if (isExpired(account.tokenExpiresAt)) {
+    const renewed = await renewIfPossible(account);
+
+    if (renewed) {
+      accountForPublish = renewed;
+    }
+  }
 
   const spec: PublishSpec = {
     text: post.text,
@@ -124,7 +219,7 @@ const handleJob = async (job: PublishJob): Promise<void> => {
   const adapter = resolveAdapter(job.network);
 
   try {
-    const result = await adapter.publish(spec, resolvedAccount);
+    const result = await adapter.publish(spec, accountForPublish);
     await patchJob(job.tenantId, job.id, {
       status: 'succeeded',
       externalPostId: result.externalPostId,

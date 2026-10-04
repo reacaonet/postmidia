@@ -1,12 +1,16 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import {
   createCampaign,
   createPost,
+  dispatchJobNow,
   getAccounts,
   getCampaigns,
   getJobs,
   getNetworks,
+  getPosts,
   reconcileJob,
+  rescheduleJob,
+  updatePost,
 } from '../api';
 import { rejectionGroups } from '../api/client';
 import type {
@@ -15,6 +19,7 @@ import type {
   JobStatus,
   NetworkContentType,
   NetworkSpec,
+  Post,
   PublishJob,
 } from '../api/types';
 import { useAction, useAsync } from '../useAsync';
@@ -108,14 +113,16 @@ const Planning = (): JSX.Element => {
 
       {campaigns.data &&
         campaigns.data.data.map((campaign) => (
-          <PostComposer
-            key={campaign.id}
-            campaign={campaign}
-            accounts={accounts.data?.data ?? []}
-            specs={specs}
-            canWrite={canWrite}
-            onPublished={campaigns.reload}
-          />
+          <Fragment key={campaign.id}>
+            <PostComposer
+              campaign={campaign}
+              accounts={accounts.data?.data ?? []}
+              specs={specs}
+              canWrite={canWrite}
+              onPublished={campaigns.reload}
+            />
+            <CampaignPosts campaign={campaign} canWrite={canWrite} onChanged={campaigns.reload} />
+          </Fragment>
         ))}
     </>
   );
@@ -252,13 +259,19 @@ const PostComposer = ({
 
   // `requiresMedia` na spec da rede e a regra do backend (`media_required`), e
   // ela vale por rede, nao por tipo: Instagram exige midia em qualquer formato.
-  const needsMedia = specsUsed.some((spec) => spec.text.requiresMedia);
+  //
+  // "Exigir" e "permitir" sao coisas diferentes, e usar a mesma flag para as duas
+  // escondia o campo de midia inteiro no WhatsApp e no Telegram, cujas specs
+  // aceitam imagem e video mas nao obrigam. O operador via um composer so de
+  // texto justamente nas duas redes que ele mais usa para cliente.
+  const mediaRequired = specsUsed.some((spec) => spec.text.requiresMedia);
+  const mediaAllowed = specsUsed.length > 0;
 
   // A compatibilidade imagem/video e por tipo: `reel` nao aceita imagem, e o
   // painel tem de recusar aqui porque o backend recusaria depois com
   // `image_not_accepted`.
   const kindConflicts =
-    activeType !== null && needsMedia
+    mediaUrl.trim() !== '' && activeType !== null
       ? mediaKind === 'image' && !activeType.acceptsImage
         ? `${activeType.label} não aceita imagem.`
         : mediaKind === 'video' && !activeType.acceptsVideo
@@ -267,10 +280,11 @@ const PostComposer = ({
       : null;
 
   const mediaProblems: string[] = [];
-  if (needsMedia) {
-    if (!mediaUrl.trim()) {
-      mediaProblems.push('Informe a URL da mídia.');
-    } else if (!isValidMediaUrl(mediaUrl.trim())) {
+  if (mediaRequired && !mediaUrl.trim()) {
+    mediaProblems.push('Esta rede exige mídia.');
+  }
+  if (mediaUrl.trim()) {
+    if (!isValidMediaUrl(mediaUrl.trim())) {
       mediaProblems.push('A URL precisa ser http ou https válida.');
     } else if (extensionCrossesPipeline(mediaUrl.trim())) {
       mediaProblems.push(
@@ -281,8 +295,8 @@ const PostComposer = ({
   if (kindConflicts) {
     mediaProblems.push(kindConflicts);
   }
-  if (!needsMedia && !text.trim()) {
-    mediaProblems.push('O post de texto não pode ir vazio.');
+  if (!mediaRequired && !text.trim()) {
+    mediaProblems.push('O post não pode ir vazio: nem texto nem mídia.');
   }
 
   const blockReason = !canWrite
@@ -317,7 +331,7 @@ const PostComposer = ({
         const response = await createPost(token ?? '', campaign.id, {
           contentType,
           text,
-          media: needsMedia ? [{ kind: mediaKind, url: mediaUrl.trim() }] : undefined,
+          media: mediaUrl.trim() ? [{ kind: mediaKind, url: mediaUrl.trim() }] : [],
           accountIds: selected,
           audience: audience
             .split(',')
@@ -441,7 +455,7 @@ const PostComposer = ({
             </div>
           </label>
 
-          {needsMedia && (
+          {mediaAllowed && (
             <div className="row">
               <label>
                 <span>Tipo de mídia</span>
@@ -460,7 +474,7 @@ const PostComposer = ({
                 </div>
               </label>
               <label style={{ flex: 3 }}>
-                <span>URL da mídia</span>
+                <span>URL da mídia {mediaRequired ? '(obrigatória)' : '(opcional)'}</span>
                 <input
                   value={mediaUrl}
                   onChange={(e) => setMediaUrl(e.target.value)}
@@ -524,6 +538,267 @@ const PostComposer = ({
   );
 };
 
+/* ============================================================== conteudo */
+
+/**
+ * Um job que nunca executou: o post ainda e rascunho e pode ser corrigido.
+ * `failed` conta como executado — o worker chegou a chamar a rede.
+ */
+const isEditableJob = (job: PublishJob): boolean =>
+  job.status === 'queued' || job.status === 'cancelled';
+
+const CampaignPosts = ({
+  campaign,
+  canWrite,
+  onChanged,
+}: {
+  campaign: Campaign;
+  canWrite: boolean;
+  onChanged: () => void;
+}): JSX.Element => {
+  const { token } = useSession();
+  const [nonce, setNonce] = useState(0);
+
+  const posts = useAsync(() => getPosts(token ?? '', campaign.id), [token, campaign.id, nonce]);
+  const jobs = useAsync(() => getJobs(token ?? '', { campaignId: campaign.id }), [token, campaign.id, nonce]);
+
+  const entries = posts.data?.data ?? [];
+  const jobsByPost = new Map<string, PublishJob[]>();
+  for (const job of jobs.data?.data ?? []) {
+    jobsByPost.set(job.postId, [...(jobsByPost.get(job.postId) ?? []), job]);
+  }
+
+  const render = (): JSX.Element => {
+    if (posts.loading || jobs.loading) {
+      return <Loading what="posts" />;
+    }
+    if (posts.error) {
+      return <ErrorBox message={posts.error} onRetry={posts.reload} />;
+    }
+    if (entries.length === 0) {
+      return <Empty>Nenhum post nesta campanha ainda.</Empty>;
+    }
+
+    return (
+      <table>
+        <thead>
+          <tr>
+            <th>Conteúdo</th>
+            <th>Midia</th>
+            <th>Jobs</th>
+            <th>Criado</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map((post) => {
+            const postJobs = jobsByPost.get(post.id) ?? [];
+            const locked = postJobs.some((job) => !isEditableJob(job));
+            return (
+              <PostEditor
+                key={post.id}
+                post={post}
+                jobs={postJobs}
+                canWrite={canWrite}
+                locked={locked}
+                onChanged={() => {
+                  setNonce((n) => n + 1);
+                  onChanged();
+                }}
+              />
+            );
+          })}
+        </tbody>
+      </table>
+    );
+  };
+
+  return (
+    <div className="card">
+      <div className="card-title">
+        <span>
+          Posts de <strong>{campaign.name}</strong>
+        </span>
+        <button className="secondary small" onClick={() => setNonce((n) => n + 1)}>
+          Atualizar
+        </button>
+      </div>
+      {render()}
+    </div>
+  );
+};
+
+const PostEditor = ({
+  post,
+  jobs,
+  canWrite,
+  locked,
+  onChanged,
+}: {
+  post: Post;
+  jobs: PublishJob[];
+  canWrite: boolean;
+  locked: boolean;
+  onChanged: () => void;
+}): JSX.Element => {
+  const { token } = useSession();
+  const { run, busy, error } = useAction();
+  const [open, setOpen] = useState(false);
+  const [contentType, setContentType] = useState(post.contentType);
+  const [text, setText] = useState(post.text);
+  const [mediaUrl, setMediaUrl] = useState(post.media[0]?.url ?? '');
+  const [rejections, setRejections] = useState<ReturnType<typeof rejectionGroups>>([]);
+  const [done, setDone] = useState<string | null>(null);
+
+  const mediaKind = post.media[0]?.kind ?? 'image';
+  const firstMedia = post.media[0];
+  const preview = firstMedia === undefined ? null : firstMedia.url;
+
+  const openForm = (): void => {
+    setContentType(post.contentType);
+    setText(post.text);
+    setMediaUrl(post.media[0]?.url ?? '');
+    setRejections([]);
+    setDone(null);
+    setOpen(!open);
+  };
+
+  const save = async (event: React.FormEvent): Promise<void> => {
+    event.preventDefault();
+    setRejections([]);
+    setDone(null);
+
+    // Midia so entra no corpo quando mudou. Sem media no post e nada digitado,
+    // `undefined` mantem o estado; com media que o operador apagou, `[]` remove.
+    const media: Array<{ kind: 'image' | 'video'; url: string }> | undefined =
+      post.media.length === 0 && mediaUrl.trim() === ''
+        ? undefined
+        : [{ kind: mediaKind, url: mediaUrl.trim() }];
+
+    await run(async () => {
+      try {
+        await updatePost(token ?? '', post.id, {
+          contentType: contentType.trim(),
+          text,
+          media,
+        });
+        setDone('Conteudo atualizado. Os jobs na fila vao publicar a versao nova.');
+        onChanged();
+      } catch (err: unknown) {
+        setRejections(rejectionGroups(err));
+        throw err;
+      }
+    });
+  };
+
+  const queued = jobs.filter((job) => job.status === 'queued').length;
+
+  return (
+    <>
+      <tr>
+        <td style={{ maxWidth: 420 }}>
+          <div className="mono" style={{ fontSize: 12, color: 'var(--muted)' }}>
+            {post.contentType}
+          </div>
+          <div style={{ whiteSpace: 'pre-wrap' }}>{post.text || <span style={{ color: 'var(--muted)' }}>(sem texto)</span>}</div>
+        </td>
+        <td>
+          {preview ? (
+            <span className="mono" style={{ fontSize: 12 }}>
+              {mediaKind} · {preview}
+            </span>
+          ) : (
+            <span style={{ color: 'var(--muted)' }}>—</span>
+          )}
+        </td>
+        <td>
+          {jobs.length === 0 ? (
+            <span style={{ color: 'var(--muted)' }}>—</span>
+          ) : (
+            <div className="actions">
+              {jobs.map((job) => (
+                <span key={job.id} className="mono" style={{ fontSize: 12 }}>
+                  {job.network}
+                  {job.recipient ? `:${job.recipient}` : ''} <JobPill status={job.status} />
+                </span>
+              ))}
+            </div>
+          )}
+        </td>
+        <td>
+          <DateTime value={post.createdAt} />
+        </td>
+        <td>
+          {canWrite && !locked && (
+            <button className="secondary small" onClick={openForm}>
+              {open ? 'Fechar' : 'Editar'}
+            </button>
+          )}
+          {canWrite && locked && (
+            <span style={{ color: 'var(--muted)', fontSize: 12 }}>
+              já publicado{queued === 0 ? '' : ` · ${queued} na fila`}
+            </span>
+          )}
+        </td>
+      </tr>
+      {open && (
+        <tr>
+          <td colSpan={5}>
+            <form onSubmit={save}>
+              {error && <div className="alert error">{error}</div>}
+              {rejections.length > 0 && (
+                <div className="alert warn">
+                  <strong>Recusado por {rejections.length} conta(s).</strong>
+                  <ul>
+                    {rejections.map((group) => (
+                      <li key={group.accountId}>
+                        <span className="mono">{group.network}</span>: {group.issues.map((issue) => issue.message).join(' ')}
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="hint">Nada foi alterado. O post continua como estava.</div>
+                </div>
+              )}
+              {done && <div className="alert ok">{done}</div>}
+
+              <div className="row">
+                <label>
+                  <span>Tipo de conteudo</span>
+                  <input value={contentType} onChange={(e) => setContentType(e.target.value)} />
+                  <div className="hint">O id de cada rede: feed, reel, story, carousel, template…</div>
+                </label>
+                {post.media.length > 0 && (
+                  <label style={{ flex: 2 }}>
+                    <span>URL da midia</span>
+                    <input value={mediaUrl} onChange={(e) => setMediaUrl(e.target.value)} />
+                    <div className="hint">Vazio remove a midia do post. O tipo atual é {mediaKind}.</div>
+                  </label>
+                )}
+              </div>
+
+              <label>
+                <span>Texto</span>
+                <textarea value={text} onChange={(e) => setText(e.target.value)} rows={4} />
+                <div className="hint">
+                  {text.length} caracteres · vale para os {jobs.length} job(s) ainda na fila deste post.
+                </div>
+              </label>
+
+              <div className="hint">
+                Editar vale para todos os jobs nao executados: o worker le o post do banco na hora de publicar.
+              </div>
+
+              <button type="submit" disabled={busy || contentType.trim() === ''}>
+                {busy ? <span className="spinner" /> : 'Salvar conteudo'}
+              </button>
+            </form>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+};
+
 /* ==================================================================== jobs */
 
 const Jobs = (): JSX.Element => {
@@ -539,6 +814,7 @@ const Jobs = (): JSX.Element => {
   const entries = jobs.data?.data ?? [];
   const failed = entries.filter((job) => job.status === 'failed').length;
   const pendingSync = entries.filter((job) => job.releaseIdMissing).length;
+  const queuedCount = entries.filter((job) => job.status === 'queued').length;
 
   return (
     <>
@@ -601,6 +877,14 @@ const Jobs = (): JSX.Element => {
           automaticamente; use "Reconciliar" se o resultado não aparecer.
         </div>
       )}
+
+      {queuedCount === 0 && entries.length > 0 && (
+        <div className="alert info">
+          Nenhum job <strong>na fila</strong> neste filtro. &quot;Reagendar&quot; e &quot;Enviar agora&quot; só existem
+          em job <span className="mono">queued</span>: um job que já rodou não tem horário para mover, e um job que
+          falhou pode ter saído na rede — por isso o botão some em vez de aparecer e devolver 409.
+        </div>
+      )}
     </>
   );
 };
@@ -617,6 +901,8 @@ const JobRow = ({
   const { token } = useSession();
   const { run, busy, error } = useAction();
   const [outcome, setOutcome] = useState<string | null>(null);
+  const [whenOpen, setWhenOpen] = useState(false);
+  const [when, setWhen] = useState('');
 
   const reconcile = () =>
     run(async () => {
@@ -629,6 +915,31 @@ const JobRow = ({
         onChanged();
       }
     });
+
+  const reschedule = async (event: React.FormEvent): Promise<void> => {
+    event.preventDefault();
+    const iso = localInputToIsoUtc(when);
+    if (iso === undefined) {
+      setOutcome('Horário inválido.');
+      return;
+    }
+    await run(async () => {
+      await rescheduleJob(token ?? '', job.id, iso);
+      setOutcome(null);
+      setWhenOpen(false);
+      onChanged();
+    });
+  };
+
+  const sendNow = () =>
+    run(async () => {
+      await dispatchJobNow(token ?? '', job.id);
+      setOutcome(null);
+      setWhenOpen(false);
+      onChanged();
+    });
+
+  const editable = job.status === 'queued';
 
   return (
     <tr>
@@ -660,13 +971,40 @@ const JobRow = ({
         {job.lastError ?? <span style={{ color: 'var(--muted)' }}>—</span>}
       </td>
       <td>
-        {job.releaseIdMissing && canWrite ? (
-          <button className="secondary small" disabled={busy} onClick={reconcile}>
-            {busy ? <span className="spinner" /> : 'Reconciliar'}
-          </button>
-        ) : job.releaseIdMissing ? (
-          <span style={{ color: 'var(--muted)', fontSize: 12 }}>somente owner/admin</span>
-        ) : null}
+        <div className="actions">
+          {editable && canWrite && (
+            <>
+              <button className="secondary small" disabled={busy} onClick={() => setWhenOpen(!whenOpen)}>
+                Reagendar
+              </button>
+              <button className="secondary small" disabled={busy} onClick={sendNow}>
+                Enviar agora
+              </button>
+            </>
+          )}
+          {job.releaseIdMissing && canWrite && (
+            <button className="secondary small" disabled={busy} onClick={reconcile}>
+              {busy ? <span className="spinner" /> : 'Reconciliar'}
+            </button>
+          )}
+          {job.releaseIdMissing && !canWrite && (
+            <span style={{ color: 'var(--muted)', fontSize: 12 }}>somente owner/admin</span>
+          )}
+        </div>
+        {whenOpen && (
+          <form onSubmit={reschedule} style={{ marginTop: 6 }}>
+            <input
+              type="datetime-local"
+              value={when}
+              onChange={(e) => setWhen(e.target.value)}
+              required
+            />
+            <button type="submit" className="small" disabled={busy || when === ''} style={{ marginTop: 4 }}>
+              {busy ? <span className="spinner" /> : 'Confirmar'}
+            </button>
+            <div className="hint">O backend exige UTC; o painel converte o horário local.</div>
+          </form>
+        )}
         {outcome && <div className="hint" style={{ marginTop: 4 }}>{outcome}</div>}
         {error && (
           <div className="alert error" style={{ marginTop: 6, marginBottom: 0, fontSize: 12 }}>

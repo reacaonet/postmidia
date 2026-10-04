@@ -1,21 +1,25 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { hasAdapter, resolveAdapter } from '../channels/registry';
 import { enrichMedia } from '../channels/media-probe';
+import { expandTargets, validatePostForTargets, type PostTarget } from '../channels/post-validation';
 import type { PublishSpec } from '../channels/adapter';
 import { decryptSecret } from '../security/secret-box';
 import {
   getAccount,
   getCampaign,
   getJob,
+  getPost,
   insertCampaign,
   insertJob,
   insertPost,
   listCampaigns,
   listJobs,
+  listPosts,
   toPublicAccount,
+  updateJobSchedule,
+  updatePost,
 } from '../store';
-import type { PublishJobStatus, ResolvedChannelAccount } from '../domain/types';
+import type { ChannelAccount, PublishJobStatus, ResolvedChannelAccount } from '../domain/types';
 import { requireRole, requireTenant, type AuthenticatedRequest, type TenantRequest } from '../http/tenant';
 import { asyncHandler } from '../http/async-handler';
 import { appendAudit } from '../store';
@@ -48,7 +52,16 @@ const createPostSchema = z.object({
   scheduledAt: z.string().datetime().optional(),
 });
 
-const EXPAND_AUDIENCE: Partial<Record<string, true>> = { whatsapp: true };
+const editPostSchema = z.object({
+  contentType: z.string().min(1).optional(),
+  text: z.string().optional(),
+  media: z.array(mediaSchema).optional(),
+  settings: z.record(z.unknown()).optional(),
+});
+
+const rescheduleSchema = z.object({
+  scheduledAt: z.string().datetime(),
+});
 
 router.post(
   '/campaigns',
@@ -97,14 +110,24 @@ router.post(
       return;
     }
 
-    const targets = input.accountIds.map((id) => {
-      const account = accounts.get(id)!;
-      const resolved: ResolvedChannelAccount = {
+    const resolvedById = new Map<string, ResolvedChannelAccount>();
+    for (const account of accounts.values()) {
+      if (account === undefined) {
+        continue;
+      }
+      resolvedById.set(account.id, {
         ...account,
         secret: decryptSecret(account.encryptedSecret),
-      };
-      return { account, resolved };
-    });
+      });
+    }
+
+    const targets = expandTargets(
+      [...accounts.values()].filter(
+        (account): account is NonNullable<typeof account> => account !== undefined
+      ),
+      resolvedById,
+      input.audience
+    );
 
     // O tamanho da midia e derivado do servidor quando o cliente nao manda.
     // Sem isto, `image_too_large`/`video_too_large` so disparavam para quem se
@@ -122,43 +145,7 @@ router.post(
       idempotencyKey: `draft-${Date.now()}`,
     };
 
-    const rejections = (
-      await Promise.all(
-        targets.map(async ({ account, resolved }) => {
-          if (!hasAdapter(account.network)) {
-            return {
-              accountId: account.id,
-              network: account.network,
-              issues: [
-                {
-                  field: 'account' as const,
-                  code: 'no_adapter',
-                  message: `Nenhum adapter registrado para ${account.network}`,
-                },
-              ],
-            };
-          }
-
-          const baseSpec: PublishSpec = { ...spec, recipient: null };
-          const needsAudience = EXPAND_AUDIENCE[account.network] === true;
-          const candidates = needsAudience
-            ? input.audience.length > 0
-              ? input.audience
-              : [null]
-            : [null];
-
-          const issues = (
-            await Promise.all(
-              candidates.map((recipient) =>
-                resolveAdapter(account.network).validate({ ...baseSpec, recipient }, resolved)
-              )
-            )
-          ).flat();
-
-          return issues.length > 0 ? { accountId: account.id, network: account.network, issues } : null;
-        })
-      )
-    ).filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+    const rejections = await validatePostForTargets(spec, targets);
 
     if (rejections.length > 0) {
       res.status(422).json({
@@ -185,27 +172,22 @@ router.post(
     const delayMs = Math.max(0, new Date(scheduledAt).getTime() - Date.now());
 
     const jobs = [];
-    for (const { account } of targets) {
-      const needsAudience = EXPAND_AUDIENCE[account.network] === true;
-      const recipients = needsAudience && input.audience.length > 0 ? input.audience : [null];
-
-      for (const recipient of recipients) {
-        jobs.push(
-          await insertJob({
-            tenantId,
-            postId: post.id,
-            channelAccountId: account.id,
-            network: account.network,
-            recipient,
-            status: 'queued',
-            scheduledAt,
-            attempts: 0,
-            externalPostId: null,
-            permalink: null,
-            lastError: null,
-          })
-        );
-      }
+    for (const { account, recipient } of targets) {
+      jobs.push(
+        await insertJob({
+          tenantId,
+          postId: post.id,
+          channelAccountId: account.id,
+          network: account.network,
+          recipient,
+          status: 'queued',
+          scheduledAt,
+          attempts: 0,
+          externalPostId: null,
+          permalink: null,
+          lastError: null,
+        })
+      );
     }
 
     for (const job of jobs) {
@@ -238,6 +220,233 @@ router.post(
         })),
       },
     });
+  })
+);
+
+router.get(
+  '/campaigns/:id/posts',
+  requireTenant,
+  asyncHandler(async (req, res) => {
+    const tenantId = (req as TenantRequest).tenantId;
+
+    const campaign = await getCampaign(tenantId, req.params.id);
+    if (!campaign) {
+      res.status(404).json({ success: false, error: 'Campanha nao encontrada' });
+      return;
+    }
+
+    res.json({ success: true, data: await listPosts(tenantId, { campaignId: campaign.id }) });
+  })
+);
+
+/**
+ * Corrige o conteudo de um post que ainda nao foi publicado.
+ *
+ * O worker le o post do banco no momento da execucao, entao alterar o conteudo
+ * vale para todos os jobs ainda na fila sem precisar reenfileirar nada.
+ *
+ * A guarda e o que torna isso seguro: enquanto nenhum job do post rodou, o
+ * conteudo e um rascunho, e um rascunho pode ser corrigido. Depois que um job
+ * rodou, o texto gravado em `sp_posts` virou o registro do que foi publicado e
+ * sobrescreve-lo deixaria o historico sem relacao com o que saiu na rede.
+ */
+router.patch(
+  '/posts/:id',
+  requireTenant,
+  asyncHandler(async (req, res) => {
+    const request = req as AuthenticatedRequest;
+    const input = editPostSchema.parse(req.body);
+    const tenantId = request.tenantId;
+
+    const post = await getPost(tenantId, req.params.id);
+    if (!post) {
+      res.status(404).json({ success: false, error: 'Post nao encontrado' });
+      return;
+    }
+
+    const jobs = await listJobs(tenantId, { postId: post.id });
+    const ran = jobs.filter((job) => job.status !== 'queued' && job.status !== 'cancelled');
+
+    if (ran.length > 0) {
+      res.status(409).json({
+        success: false,
+        error: 'Post ja publicado: conteudo de post com job executado nao pode ser alterado',
+        data: { publishedJobs: ran.length, statuses: [...new Set(ran.map((job) => job.status))] },
+      });
+      return;
+    }
+
+    const media = input.media === undefined ? post.media : await enrichMedia(input.media);
+    const text = input.text ?? post.text;
+    const contentType = input.contentType ?? post.contentType;
+    const settings = input.settings ?? post.settings;
+
+    // Revalida contra os destinos ja gravados nos jobs, com o destinatario de
+    // cada um. Reaproveitar os jobs em vez dos `accountIds` da criacao importa:
+    // a audiencia de WhatsApp ja foi expandida em uma linha por contato, e e
+    // essa lista que decide para quem o texto novo e valido.
+    const resolvedById = new Map<string, ResolvedChannelAccount>();
+    const accountsById = new Map<string, ChannelAccount>();
+    for (const id of new Set(jobs.map((job) => job.channelAccountId))) {
+      const account = await getAccount(tenantId, id);
+      if (!account) {
+        res.status(409).json({ success: false, error: `Conta de destino nao existe mais: ${id}` });
+        return;
+      }
+      accountsById.set(id, account);
+      resolvedById.set(id, { ...account, secret: decryptSecret(account.encryptedSecret) });
+    }
+
+    const targets: PostTarget[] = jobs.flatMap((job) => {
+      const account = accountsById.get(job.channelAccountId);
+      const resolved = resolvedById.get(job.channelAccountId);
+      return account === undefined || resolved === undefined
+        ? []
+        : [{ account, resolved, recipient: job.recipient }];
+    });
+
+    const spec: PublishSpec = {
+      text,
+      media,
+      contentType,
+      settings,
+      recipient: null,
+      idempotencyKey: `edit-${post.id}-${Date.now()}`,
+    };
+
+    const rejections = await validatePostForTargets(spec, targets);
+    if (rejections.length > 0) {
+      res.status(422).json({
+        success: false,
+        error: 'Post invalido para um ou mais destinos',
+        data: rejections,
+      });
+      return;
+    }
+
+    const updated = await updatePost(tenantId, post.id, { contentType, text, media, settings });
+    if (!updated) {
+      res.status(404).json({ success: false, error: 'Post nao encontrado' });
+      return;
+    }
+
+    await appendAudit({
+      tenantId,
+      actorUserId: request.userId,
+      actorEmail: request.email,
+      action: 'post.updated',
+      entityType: 'post',
+      entityId: post.id,
+      metadata: {
+        campaignId: post.campaignId,
+        fields: Object.keys(input),
+        affectedJobs: jobs.length,
+      },
+    });
+
+    res.json({ success: true, data: { post: updated } });
+  })
+);
+
+/**
+ * Move o horario de um job na fila.
+ *
+ * So `queued`: um job em execucao ja foi entregue ao provider, e um job
+ * terminado nao tem o que reagendar.
+ */
+router.patch(
+  '/jobs/:id/schedule',
+  requireTenant,
+  asyncHandler(async (req, res) => {
+    const request = req as AuthenticatedRequest;
+    const input = rescheduleSchema.parse(req.body);
+    const tenantId = request.tenantId;
+
+    const job = await getJob(tenantId, req.params.id);
+    if (!job) {
+      res.status(404).json({ success: false, error: 'Job nao encontrado' });
+      return;
+    }
+
+    if (job.status !== 'queued') {
+      res.status(409).json({
+        success: false,
+        error: `Job em ${job.status}; so job na fila pode ser reagendado`,
+      });
+      return;
+    }
+
+    const scheduledAt = new Date(input.scheduledAt).toISOString();
+    const updated = await updateJobSchedule(tenantId, job.id, scheduledAt);
+    if (!updated) {
+      res.status(404).json({ success: false, error: 'Job nao encontrado' });
+      return;
+    }
+
+    await queue.reschedule(updated, Math.max(0, new Date(scheduledAt).getTime() - Date.now()));
+
+    await appendAudit({
+      tenantId,
+      actorUserId: request.userId,
+      actorEmail: request.email,
+      action: 'job.rescheduled',
+      entityType: 'job',
+      entityId: job.id,
+      metadata: { from: job.scheduledAt, to: scheduledAt, network: job.network },
+    });
+
+    res.json({ success: true, data: { job: updated } });
+  })
+);
+
+/**
+ * Puxa um job da fila para agora.
+ *
+ * Reagendar para o instante corrente e o mesmo caminho do `PATCH
+ * /jobs/:id/schedule`, o que mantem uma unica operacao de fila: remove a
+ * entrada antiga e agenda a nova com o horario novo.
+ */
+router.post(
+  '/jobs/:id/dispatch',
+  requireTenant,
+  asyncHandler(async (req, res) => {
+    const request = req as AuthenticatedRequest;
+    const tenantId = request.tenantId;
+
+    const job = await getJob(tenantId, req.params.id);
+    if (!job) {
+      res.status(404).json({ success: false, error: 'Job nao encontrado' });
+      return;
+    }
+
+    if (job.status !== 'queued') {
+      res.status(409).json({
+        success: false,
+        error: `Job em ${job.status}; so job na fila pode ser enviado agora`,
+      });
+      return;
+    }
+
+    const scheduledAt = new Date().toISOString();
+    const updated = await updateJobSchedule(tenantId, job.id, scheduledAt);
+    if (!updated) {
+      res.status(404).json({ success: false, error: 'Job nao encontrado' });
+      return;
+    }
+
+    await queue.reschedule(updated, 0);
+
+    await appendAudit({
+      tenantId,
+      actorUserId: request.userId,
+      actorEmail: request.email,
+      action: 'job.dispatch_now',
+      entityType: 'job',
+      entityId: job.id,
+      metadata: { from: job.scheduledAt, to: scheduledAt, network: job.network },
+    });
+
+    res.json({ success: true, data: { job: updated } });
   })
 );
 

@@ -69,6 +69,23 @@ const envSchema = z.object({
     .enum(['true', 'false'])
     .default('true')
     .transform((value) => value === 'true'),
+  // Consulta o provedor no cadastro da conta e recusa token invalido. Padrao e
+  // ligado porque a alternativa e aceitar qualquer texto como segredo: a conta
+  // entra `active`, o operador so descobre o problema na fila morta. Desligar e
+  // para ambiente de teste, que cadastra conta com token ficticio e nao tem
+  // provedor real para responder.
+  ACCOUNT_CREDENTIAL_CHECK_ENABLED: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((value) => value === 'true'),
+  // Base publica deste produto. E o que vira o callback do OAuth
+  // (`<base>/api/oauth/<rede>/callback`), e o provedor compara a string
+  // caractere a caractere com a Redirect URL autorizada no app. Deixar vazio
+  // desliga a conexao por OAuth em vez de mandar uma URL quebrada para o
+  // usuario na tela do provedor.
+  OAUTH_REDIRECT_BASE_URL: z.string().default(''),
+  LINKEDIN_CLIENT_ID: z.string().default(''),
+  LINKEDIN_CLIENT_SECRET: z.string().default(''),
   EMBEDDED_WORKER: z
     .enum(['true', 'false'])
     .default('true')

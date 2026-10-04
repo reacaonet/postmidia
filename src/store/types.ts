@@ -34,6 +34,7 @@ export type TemplateInput = Omit<WhatsappTemplate, 'id' | 'createdAt'>;
 export interface JobFilter {
   status?: PublishJobStatus;
   campaignId?: string;
+  postId?: string;
 }
 
 export interface DeadLetterFilter {
@@ -145,7 +146,9 @@ export interface Store {
       displayName?: string;
       externalAccountId?: string;
       encryptedSecret?: string;
+      encryptedRefreshToken?: string;
       status?: ChannelAccountStatus;
+      tokenExpiresAt?: string | null;
     }
   ): Promise<ChannelAccount | undefined>;
   /** Apaga a conta do tenant. Devolve `false` se o id nao existe neste tenant. */
@@ -167,11 +170,31 @@ export interface Store {
 
   insertPost(input: PostInput): Promise<Post>;
   getPost(tenantId: string, id: string): Promise<Post | undefined>;
+  listPosts(tenantId: string, filter?: { campaignId?: string }): Promise<Post[]>;
+  /**
+   * Corrige o conteudo de um post que ainda nao foi publicado.
+   *
+   * `campaignId` nao entra: um post nao muda de campanha. Quem chama decide o
+   * que mandou, entao os campos ausentes ficam como estavam.
+   */
+  updatePost(
+    tenantId: string,
+    id: string,
+    changes: { contentType?: string; text?: string; media?: Post['media']; settings?: Post['settings'] }
+  ): Promise<Post | undefined>;
 
   insertJob(input: JobInput): Promise<PublishJob>;
   getJob(tenantId: string, id: string): Promise<PublishJob | undefined>;
   patchJob(tenantId: string, id: string, patch: Partial<PublishJob>): Promise<PublishJob | undefined>;
   listJobs(tenantId: string, filter?: JobFilter): Promise<PublishJob[]>;
+  /**
+   * Move o horario de um job que ainda nao rodou.
+   *
+   * Separado do `patchJob` de proposito: reagendar muda `scheduled_at` e nada
+   * mais, enquanto o worker escreve `status`, `attempts` e o resultado. Misturar
+   * os dois daria a operacao de reagendar permissao de|Publication arbitraria.
+   */
+  updateJobSchedule(tenantId: string, id: string, scheduledAt: string): Promise<PublishJob | undefined>;
 
   /**
    * Jobs de qualquer tenant que publicaram mas ainda nao tem o id do provedor.

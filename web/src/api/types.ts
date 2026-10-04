@@ -210,19 +210,29 @@ export interface RejectionGroup {
   issues: ValidationIssue[];
 }
 
+export interface Post {
+  id: string;
+  tenantId: string;
+  campaignId: string;
+  contentType: string;
+  text: string;
+  media: MediaItem[];
+  settings: Record<string, unknown>;
+  createdAt: string;
+}
+
 export interface CreatePostResult {
-  post: {
-    id: string;
-    tenantId: string;
-    campaignId: string;
-    contentType: string;
-    text: string;
-    media: MediaItem[];
-    settings: Record<string, unknown>;
-    createdAt: string;
-  };
+  post: Post;
   scheduledAt: string;
   jobs: JobWithAccount[];
+}
+
+export interface UpdatePostResult {
+  post: Post;
+}
+
+export interface JobResult {
+  job: PublishJob;
 }
 
 export interface ReconcileResult {

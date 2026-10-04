@@ -1,3 +1,4 @@
+import { createLinkedinAdapter } from './linkedin.adapter';
 import { createPostizAdapter } from './postiz.adapter';
 import { createTelegramAdapter } from './telegram.adapter';
 import { createWhatsappAdapter } from './whatsapp.adapter';
@@ -17,5 +18,6 @@ export const bootstrapAdapters = (): void => {
   }
   registerAdapter(createTelegramAdapter());
   registerAdapter(createWhatsappAdapter());
+  registerAdapter(createLinkedinAdapter());
   bootstrapped = true;
 };

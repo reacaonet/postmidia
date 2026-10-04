@@ -8,6 +8,7 @@ import accountRoutes from './accounts';
 import authRoutes from './auth';
 import campaignRoutes from './campaigns';
 import deadLetterRoutes from './dead-letters';
+import oauthRoutes from './oauth';
 import opsRoutes from './ops';
 import whatsappRoutes from './whatsapp';
 
@@ -49,6 +50,7 @@ router.use('/auth', (req, res, next) => {
 });
 
 router.use(authRoutes);
+router.use(oauthRoutes);
 router.use(accountRoutes);
 router.use(campaignRoutes);
 router.use(whatsappRoutes);
@@ -60,10 +62,20 @@ router.use((error: unknown, _req: unknown, res: any, _next: unknown) => {
     res.status(400).json({ success: false, error: 'Payload invalido', data: error.flatten() });
     return;
   }
-  const status = (error as { status?: number })?.status ?? 400;
+
+  // `status` e `statusCode` sao aceitos porque os dois nomes ja circulam no
+  // codigo (o handler usava so `status`, e `provider-specs` lanca com
+  // `statusCode`): ler so um deles fazia um 404 virar 400 na resposta. O `hint`
+  // viaja quando presente porque e a parte que diz ao operador o QUE fazer --
+  // sem ele, "chat not found" fica sem a instrucao de adicionar o bot como
+  // administrador, que e o que efetivamente resolve.
+  const thrown = error as { status?: number; statusCode?: number; message?: string; hint?: string };
+  const status = thrown?.status ?? thrown?.statusCode ?? 400;
+
   res.status(status).json({
     success: false,
-    error: (error as Error)?.message ?? 'Erro interno',
+    error: thrown?.message ?? 'Erro interno',
+    ...(thrown?.hint ? { hint: thrown.hint } : {}),
   });
 });
 

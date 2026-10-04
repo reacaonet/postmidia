@@ -27,7 +27,10 @@ param(
   # somou ~20 checks e tres chamadas ao ts-node (que paga o startup de novo
   # cada vez), entao subir para 420 sem mudar o valor default do runner seria
   # deixar a suite passar na base do tempo em vez de na do_orcamento.
-  [int]$TimeoutSeconds = 420,
+  # A secao 13 (editar/reagendar/enviar agora) somou ~25 checks e um sleep a
+  # mais para derrubar o worker, o que deixou a execucao perto do limite de
+  # 420s: 480s da margem sem mudar o orcamento do runner.
+  [int]$TimeoutSeconds = 480,
   [int]$Port = 8601
 )
 

@@ -64,6 +64,16 @@ ALTER TABLE channel_accounts ADD COLUMN IF NOT EXISTS provider_max_length INTEGE
 ALTER TABLE channel_accounts ADD COLUMN IF NOT EXISTS provider_rules TEXT;
 ALTER TABLE channel_accounts ADD COLUMN IF NOT EXISTS specs_synced_at TIMESTAMPTZ;
 
+-- Token de renovacao do OAuth. Fica separado do `encrypted_secret` porque o
+-- segredo e substituido a cada renovacao -- o access token vive, o refresh
+-- token nao muda. Guardar os dois no mesmo campo significaria reescrever o
+-- refresh token a cada renovacao, e um erro ali derrubaria a conta inteira em
+-- vez de custar so o access token ate a proxima tentativa.
+--
+-- NULL = conta cadastrada com token colado no painel (Telegram, WhatsApp), que
+-- nao tem fluxo de renovacao: o provedor da um token que dura.
+ALTER TABLE channel_accounts ADD COLUMN IF NOT EXISTS encrypted_refresh_token TEXT;
+
 CREATE TABLE IF NOT EXISTS campaigns (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id UUID NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,

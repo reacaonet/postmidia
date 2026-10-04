@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { NETWORK_SPECS } from '../src/domain/networks';
 import { validateAgainstNetworkSpec } from '../src/channels/adapter';
 import { toProviderSpec } from '../src/channels/postiz/spec-rules';
-import { isProviderSpecApplicable } from '../src/domain/networks';
+import { isProviderSpecApplicable, POSTIZ_BRIDGED_NETWORKS } from '../src/domain/networks';
 import { buildWhatsappMessagesUrl } from '../src/channels/whatsapp.adapter';
 import { env, WHATSAPP_GRAPH_VERSION_SCHEMA } from '../src/config';
 import type { ChannelAccount, PublishSpec, ResolvedChannelAccount } from '../src/domain/types';
@@ -81,12 +81,24 @@ check('rules em branco vira null', () => {
 // ------------------------------------------------------------- aplicabilidade por rede
 
 check('só redes bridged pelo Postiz tem provedor de specs', () => {
-  for (const network of ['instagram', 'facebook', 'linkedin', 'tiktok', 'youtube', 'x'] as const) {
+  // A lista vem do proprio dominio em vez de ser escrita aqui: este teste
+  // declarava `linkedin` como bridged e passou a falhar quando o LinkedIn virou
+  // nativo -- o que e a prova de que ele estava fixing a arquitetura em vez de
+  // descreve-la. Escrever o nome da rede aqui faz o teste envelhecer mal.
+  for (const network of POSTIZ_BRIDGED_NETWORKS) {
     assert.equal(isProviderSpecApplicable(network), true, network);
   }
-  // Nativas: nao ha endpoint de specs, e tentar daria 404 sempre.
-  assert.equal(isProviderSpecApplicable('telegram'), false);
-  assert.equal(isProviderSpecApplicable('whatsapp'), false);
+
+  // Nativas: nao ha endpoint de specs, e tentar daria 404 sempre. LinkedIn
+  // entrou aqui junto com Telegram e WhatsApp -- o token vai do painel direto
+  // para a API do provedor, sem passar pelo container do Postiz.
+  for (const network of ['telegram', 'whatsapp', 'linkedin'] as const) {
+    assert.equal(isProviderSpecApplicable(network), false, network);
+  }
+
+  // Rede que nao existe em lugar nenhum: nem bridge, nem nativa. Barra o
+  // "esquecer de tirar do bridge" sem precisar de rede de teste.
+  assert.equal(POSTIZ_BRIDGED_NETWORKS.includes('linkedin'), false);
 });
 
 // ------------------------------------------------------ validacao autoritativa

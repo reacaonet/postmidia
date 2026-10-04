@@ -7,12 +7,15 @@ import type {
   CapabilityEntry,
   CreatePostResult,
   DeadLetterJob,
+  JobResult,
   JobStatus,
   NetworksResponse,
   OpsMetrics,
+  Post,
   PublishJob,
   ReconcileResult,
   TenantRef,
+  UpdatePostResult,
   WhatsappTemplate,
 } from './types';
 
@@ -119,6 +122,19 @@ export const getAccountSettings = (
   id: string
 ): Promise<{ data: AccountSettings }> => api.get(`/accounts/${id}/settings`, token);
 
+/**
+ * URL de autorizacao da rede, para o painel abrir numa aba nova.
+ *
+ * O que a API devolve e so a URL: a troca do codigo por token acontece no
+ * callback, que o provedor abre sozinho. Por isso o painel nao precisa lidar
+ * com token nem com `code` -- ele so recarrega a lista depois.
+ */
+export const getOAuthConnectUrl = (
+  token: string,
+  network: string
+): Promise<{ data: { network: string; authorizeUrl: string; redirectUri: string } }> =>
+  api.get(`/oauth/${network}/connect`, token);
+
 // ------------------------------------------------------------ campaigns
 
 export const getCampaigns = (token: string): Promise<{ data: Campaign[] }> =>
@@ -141,6 +157,35 @@ export const createPost = (
     scheduledAt?: string;
   }
 ): Promise<{ data: CreatePostResult }> => api.post(`/campaigns/${campaignId}/posts`, body, token);
+
+export const getPosts = (token: string, campaignId: string): Promise<{ data: Post[] }> =>
+  api.get(`/campaigns/${campaignId}/posts`, token);
+
+/**
+ * Corrige conteudo de post que ainda nao rodou. Campos ausentes ficam como
+ * estavam; o backend recusa com 409 quando algum job do post ja executou.
+ */
+export const updatePost = (
+  token: string,
+  postId: string,
+  body: {
+    contentType?: string;
+    text?: string;
+    media?: Array<{ kind: 'image' | 'video'; url: string; bytes?: number; durationSeconds?: number }>;
+    settings?: Record<string, unknown>;
+  }
+): Promise<{ data: UpdatePostResult }> => api.patch(`/posts/${postId}`, body, token);
+
+/** Reagenda um job `queued`. O `scheduledAt` precisa do sufixo `Z` (UTC). */
+export const rescheduleJob = (
+  token: string,
+  jobId: string,
+  scheduledAt: string
+): Promise<{ data: JobResult }> => api.patch(`/jobs/${jobId}/schedule`, { scheduledAt }, token);
+
+/** Puxa um job `queued` para agora. */
+export const dispatchJobNow = (token: string, jobId: string): Promise<{ data: JobResult }> =>
+  api.post(`/jobs/${jobId}/dispatch`, undefined, token);
 
 /** `GET /jobs` tambem esta na raiz, nao sob `/campaigns`. */
 export const getJobs = (

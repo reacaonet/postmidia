@@ -50,6 +50,16 @@ export const createMemoryQueue = (): PublishQueue => {
       }
     },
 
+    async reschedule(job: PublishJob, delayMs: number): Promise<void> {
+      if (closed) {
+        throw new Error('Fila encerrada');
+      }
+      // `enqueue` ja cancela o timer anterior pelo job.id antes de reagendar,
+      // entao reaproveitar ele mantem as duas implementacoes com o mesmo
+      // comportamento em memoria.
+      await this.enqueue(job, delayMs);
+    },
+
     async close(): Promise<void> {
       closed = true;
       for (const timer of timers.values()) {

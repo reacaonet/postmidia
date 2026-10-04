@@ -105,8 +105,10 @@ const metricsFrom = (
 
 const newId = (): string => randomUUID();
 
-export const toPublicAccount = <T extends ChannelAccount>(account: T): Omit<T, 'encryptedSecret'> => {
-  const { encryptedSecret: _omitted, ...rest } = account;
+export const toPublicAccount = <
+  T extends ChannelAccount,
+>(account: T): Omit<T, 'encryptedSecret' | 'encryptedRefreshToken'> => {
+  const { encryptedSecret: _omitted, encryptedRefreshToken: _omittedRefresh, ...rest } = account;
   return rest;
 };
 
@@ -221,6 +223,10 @@ export const createMemoryStore = (): Store => {
       if (!account || account.tenantId !== tenantId) {
         return undefined;
       }
+      // `undefined` = nao veio no patch, entao preserva o que ja estava
+      // guardado. Sem os dois campos abaixo a renovacao de token perderia o
+      // refresh token a cada atualizacao de status, e a conta ficaria sem como
+      // renovar de novo. O Postgres faz o mesmo com COALESCE.
       const updated: ChannelAccount = {
         ...account,
         ...(changes.displayName === undefined ? {} : { displayName: changes.displayName }),
@@ -231,6 +237,10 @@ export const createMemoryStore = (): Store => {
           ? {}
           : { encryptedSecret: changes.encryptedSecret, specsSyncedAt: null }),
         ...(changes.status === undefined ? {} : { status: changes.status }),
+        ...(changes.encryptedRefreshToken === undefined
+          ? {}
+          : { encryptedRefreshToken: changes.encryptedRefreshToken }),
+        ...(changes.tokenExpiresAt === undefined ? {} : { tokenExpiresAt: changes.tokenExpiresAt }),
       };
       accounts.set(id, updated);
       return updated;
@@ -296,6 +306,39 @@ export const createMemoryStore = (): Store => {
       return post && post.tenantId === tenantId ? post : undefined;
     },
 
+    async listPosts(tenantId, filter = {}) {
+      return [...posts.values()]
+        .filter((post) => post.tenantId === tenantId)
+        .filter((post) => (filter.campaignId ? post.campaignId === filter.campaignId : true))
+        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    },
+
+    async updatePost(tenantId, id, changes) {
+      const post = posts.get(id);
+      if (!post || post.tenantId !== tenantId) {
+        return undefined;
+      }
+      const updated: Post = {
+        ...post,
+        ...(changes.contentType === undefined ? {} : { contentType: changes.contentType }),
+        ...(changes.text === undefined ? {} : { text: changes.text }),
+        ...(changes.media === undefined ? {} : { media: changes.media }),
+        ...(changes.settings === undefined ? {} : { settings: changes.settings }),
+      };
+      posts.set(id, updated);
+      return updated;
+    },
+
+    async updateJobSchedule(tenantId, id, scheduledAt) {
+      const job = jobs.get(id);
+      if (!job || job.tenantId !== tenantId) {
+        return undefined;
+      }
+      const updated: PublishJob = { ...job, scheduledAt, updatedAt: now() };
+      jobs.set(id, updated);
+      return updated;
+    },
+
     async insertJob(input) {
       const timestamp = now();
       const created: PublishJob = {
@@ -342,6 +385,9 @@ export const createMemoryStore = (): Store => {
           return false;
         }
         if (postIdsByCampaign && !postIdsByCampaign.has(job.postId)) {
+          return false;
+        }
+        if (filter.postId && job.postId !== filter.postId) {
           return false;
         }
         return true;
